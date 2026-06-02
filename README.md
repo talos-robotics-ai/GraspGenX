@@ -42,20 +42,21 @@ GraspGenX is a cross-embodiment grasp generation framework that produces high-qu
 ## Contents
 
 1. [Release News](#release-news)
-2. [Installation](#installation)
+2. [Upcoming Features](#upcoming-features)
+3. [Installation](#installation)
    - [Docker](#installation-with-docker)
    - [uv Installation](#installation-with-uv)
-3. [Inference Demos](#inference-demos)
+4. [Inference Demos](#inference-demos)
    - [Object Point Clouds](#predicting-grasps-for-segmented-object-point-clouds)
    - [Object Meshes](#predicting-grasps-for-object-meshes)
    - [Scene Point Clouds](#advanced-predicting-grasps-for-objects-from-scene-point-clouds)
-4. [End-to-End Demo And VLA Data Generation](#end-to-end-demos)
-5. [Integrating a New Gripper](#integrating-a-new-gripper)
-6. [Agentic Workflows](#agentic-workflows)
-7. [FAQ](#faq)
-8. [License](#license)
-9. [Citation](#citation)
-10. [Contact](#contact)
+5. [End-to-End Demo And VLA Data Generation](#end-to-end-demos)
+6. [Integrating a New Gripper](#integrating-a-new-gripper)
+7. [Agentic Workflows](#agentic-workflows)
+8. [FAQ](#faq)
+9. [License](#license)
+10. [Citation](#citation)
+11. [Contact](#contact)
 
 ## Release News
 
