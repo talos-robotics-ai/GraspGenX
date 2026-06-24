@@ -1165,14 +1165,11 @@ class DiffusionNoisePredictionNet(nn.Module):
             else:
                 from graspgenx.models.model_utils import repeat_new_axis
 
-                t0 = time.time()
-
                 if self.pose_repr == "mlp":
                     embed = torch.cat(
                         [sample_embedding, timestep_embedding, observation_embedding],
                         axis=-1,
                     )
-                    # print(f"Concatenation took {time.time() - t0}s")
                 else:
                     embed = torch.cat(
                         [timestep_embedding, observation_embedding], axis=-1
@@ -1184,7 +1181,6 @@ class DiffusionNoisePredictionNet(nn.Module):
                     self.query_pos_enc.weight, batch_size, dim=1
                 )
 
-                t0 = time.time()
                 for i in range(self.num_layers):
 
                     embed = self.self_attention_layers[i](
@@ -1195,10 +1191,8 @@ class DiffusionNoisePredictionNet(nn.Module):
                         query_pos_enc,
                     )
                     embed = self.ffn_layers[i](embed)
-                # print(f"Attention took {time.time() - t0}s")
             embed = embed.squeeze(0)
         else:
-            t0 = time.time()
             if self.pose_repr == "mlp":
                 embed = torch.cat(
                     [sample_embedding, timestep_embedding, observation_embedding],

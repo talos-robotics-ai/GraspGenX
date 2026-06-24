@@ -218,6 +218,20 @@ def parse_args():
         default=100,
         help="Real-world format only: skip objects whose segmented PC has fewer points.",
     )
+    parser.add_argument(
+        "--tensorrt",
+        action="store_true",
+        help="Compile the diffusion denoiser to TensorRT for faster inference "
+        "(opt-in; requires the 'tensorrt' extra: `uv sync --extra tensorrt`). "
+        "Falls back to eager PyTorch if TensorRT is unavailable.",
+    )
+    parser.add_argument(
+        "--tensorrt_precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16"],
+        help="TensorRT precision when --tensorrt is set (default: fp32 for parity).",
+    )
     return parser.parse_args()
 
 
@@ -420,7 +434,11 @@ if __name__ == "__main__":
         print(f"Loading gripper: {gripper_name}")
         print(f"Assets directory: {args.assets_dir}")
         grasp_sampler = GraspGenXSampler(
-            model_cfg, gripper_name, assets_dir=args.assets_dir
+            model_cfg,
+            gripper_name,
+            assets_dir=args.assets_dir,
+            use_tensorrt=args.tensorrt,
+            tensorrt_precision=args.tensorrt_precision,
         )
         gripper = grasp_sampler.get_gripper_info()
 

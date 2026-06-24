@@ -118,6 +118,12 @@ serve = [
     "msgpack",
     "msgpack-numpy",
 ]
+# TensorRT acceleration for the diffusion denoiser (opt-in). Versions match the
+# installed torch==2.6.0+cu124. Install with: uv sync --extra tensorrt
+tensorrt = [
+    "torch-tensorrt>=2.6,<2.7",
+    "tensorrt>=10,<11",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -134,6 +140,7 @@ testpaths = ["tests"]
 markers = [
     "integration: tests requiring a live GraspGenX server or GPU",
     "end2end: slow end-to-end pick-and-place demos (GPU + cuRobo + Newton)",
+    "tensorrt: tests requiring TensorRT (GPU + torch_tensorrt); opt-in extra",
 ]
 
 [tool.black]

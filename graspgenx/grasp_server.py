@@ -24,6 +24,8 @@ class GraspGenXSampler:
         cfg: omegaconf.DictConfig,
         gripper_name: str,
         assets_dir: str = None,
+        use_tensorrt: bool = False,
+        tensorrt_precision: str = "fp32",
     ):
         """
         Args:
@@ -31,6 +33,10 @@ class GraspGenXSampler:
             gripper_name: Name of the gripper (must exist in assets)
             assets_dir: Root directory containing x_grippers/ and proc_grippers/
                         subdirectories. Defaults to /code/assets (docker path).
+            use_tensorrt: If True, compile the diffusion denoiser to TensorRT
+                          (opt-in; requires the 'tensorrt' extra). Falls back to
+                          eager PyTorch if unavailable or compilation fails.
+            tensorrt_precision: 'fp32' (default, exact parity) or 'fp16'.
         """
 
         self.cfg = cfg
@@ -55,6 +61,21 @@ class GraspGenXSampler:
         model.eval()
 
         self.model = model.cuda().eval()
+
+        if use_tensorrt:
+            from graspgenx.models.tensorrt_utils import accelerate_sampler
+            from graspgenx.samplers.graspmoe import set_gpu_obb
+
+            accelerated = accelerate_sampler(self, precision=tensorrt_precision)
+            if accelerated:
+                logger.info("Diffusion denoiser accelerated with TensorRT.")
+            else:
+                logger.warning(
+                    "TensorRT acceleration not applied; using eager PyTorch."
+                )
+            # Run the GraspMoE OBB outlier-removal on GPU only when TensorRT is
+            # requested; otherwise it stays on the CPU (scipy).
+            set_gpu_obb(True)
 
     @staticmethod
     def run_inference(
@@ -141,6 +162,7 @@ class GraspGenXSampler:
         num_grasps: int = 200,
         topk_num_grasps: int = -1,
         remove_outliers: bool = True,
+        return_object_embedding: bool = False,
     ) -> list:
         """Batched run_inference: one diffusion + discriminator forward pass
         over N object PCs. Equivalent to ``[run_inference(pc, ...) for pc in
@@ -238,6 +260,11 @@ class GraspGenXSampler:
                 g_i[:, :3, 3] = g_i[:, :3, 3] + center.to(g_i.device)
                 g_i[:, 3, 3] = 1.0
             outputs.append((g_i, c_i))
+
+        if return_object_embedding:
+            # Per-object discriminator embedding [N, num_object_dim] (or None if
+            # the discriminator did not expose it), for reuse without re-encoding.
+            return outputs, model_outputs.get("object_embedding", None)
         return outputs
 
     @torch.inference_mode()

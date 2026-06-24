@@ -11,6 +11,7 @@
 # The OBB implementation is inspired from Berkeley AUTOLab's Cap-X paper and discussions with Ken Goldberg, Shuangyu Xie and Eric Chen.
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence
 
 import numpy as np
@@ -24,6 +25,55 @@ from graspgenx.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# GPU preprocessing flag. Controls (a) the OBB statistical-outlier-removal kNN
+# (torch.cdist instead of scipy cKDTree, double precision -> exact parity) and
+# (b) the diffusion-path point_cloud_outlier_removal device. Numerically
+# equivalent to the CPU paths.
+#
+# Default = CPU (scipy). It is enabled only when TensorRT is requested (the
+# GraspGenXSampler use_tensorrt path calls set_gpu_obb(True)); without TensorRT
+# the OBB stays on the CPU. The GRASPGENX_GPU_OBB env var is an explicit override
+# that wins over the automatic behaviour ("1" forces GPU, "0" forces CPU).
+_GPU_OBB_ENV = os.environ.get("GRASPGENX_GPU_OBB")  # None | "0" | "1"
+_GPU_OBB = _GPU_OBB_ENV == "1"
+
+# Preprocessing optimizations (default on; exposed for ablation/benchmarking).
+# _REUSE_OBJ_EMBED: reuse the diffusion-pass discriminator object embedding for
+#   OBB-candidate scoring instead of re-encoding per object.
+# _VECTORIZE_CAND: build OBB face candidates with vectorized numpy instead of a
+#   triple Python loop (bit-identical output).
+_REUSE_OBJ_EMBED = True
+_VECTORIZE_CAND = True
+
+
+def set_gpu_obb(enabled: bool) -> None:
+    """Enable/disable GPU OBB (no-op if GRASPGENX_GPU_OBB explicitly set)."""
+    global _GPU_OBB
+    if _GPU_OBB_ENV is not None:
+        return  # explicit env override wins
+    _GPU_OBB = bool(enabled)
+
+
+def _sor_keep_mask_torch(
+    pts: np.ndarray, k: int, std_ratio: float
+) -> np.ndarray:
+    """kNN-based statistical-outlier-removal keep-mask, computed on GPU.
+
+    Mirrors the scipy path exactly (double precision, mean of the k nearest
+    non-self distances, population std). Chunked over query rows to bound the
+    distance-matrix memory for large clouds.
+    """
+    t = torch.from_numpy(np.ascontiguousarray(pts)).double().cuda()
+    n = t.shape[0]
+    mean_d = torch.empty(n, dtype=torch.float64, device=t.device)
+    chunk = 4096
+    for i in range(0, n, chunk):
+        d = torch.cdist(t[i : i + chunk], t)  # (chunk, N)
+        knn = d.topk(k + 1, dim=1, largest=False).values  # includes self (0)
+        mean_d[i : i + chunk] = knn[:, 1:].mean(dim=1)
+    thresh = mean_d.mean() + std_ratio * mean_d.std(unbiased=False)
+    return (mean_d < thresh).cpu().numpy()
+
 
 # ---------------------------------------------------------------------------
 # Oriented bounding box (numpy/scipy only, no cv2)
@@ -33,6 +83,11 @@ def _statistical_outlier_removal(
 ) -> np.ndarray:
     if len(pts) <= k + 1:
         return pts
+    if _GPU_OBB and torch.cuda.is_available():
+        try:
+            return pts[_sor_keep_mask_torch(pts, k, std_ratio)]
+        except Exception as e:  # pragma: no cover - fall back to CPU
+            logger.debug(f"[graspmoe] GPU SOR failed ({e}); using scipy cKDTree.")
     tree = cKDTree(pts)
     d, _ = tree.query(pts, k=k + 1)
     mean_d = d[:, 1:].mean(axis=1)
@@ -156,8 +211,14 @@ def _score_grasps_with_discriminator(
     pc_centered: torch.Tensor,
     pc_center: np.ndarray,
     grasp_sampler: GraspGenXSampler,
+    object_embedding: Optional[torch.Tensor] = None,
 ) -> np.ndarray:
-    """Discriminator-only inference on a batch of world-frame grasps."""
+    """Discriminator-only inference on a batch of world-frame grasps.
+
+    If ``object_embedding`` (the object's precomputed discriminator embedding,
+    shape [num_object_dim]) is given, it is injected so the discriminator skips
+    re-encoding the object point cloud.
+    """
     if len(grasps_world) == 0:
         return np.zeros((0,), dtype=np.float32)
 
@@ -178,6 +239,9 @@ def _score_grasps_with_discriminator(
 
     data_batch = collate([data])
     data_batch["grasp_key"] = "grasps"
+    if object_embedding is not None:
+        # [num_object_dim] -> [1, num_object_dim] (one object in this batch)
+        data_batch["object_embedding"] = object_embedding.reshape(1, -1).to(device)
     with torch.inference_mode():
         out_data, _, _ = grasp_sampler.model.grasp_discriminator.infer(data_batch)
     return (
@@ -246,23 +310,52 @@ def _build_face_candidates(
     gy = np.cross(gz, gx)
     base_R = np.column_stack([gx, gy, gz])
 
-    candidates = []
-    for p in positions_local:
-        anchor = face_origin_world + float(p) * in_plane_axis_world
-        for yaw in yaws:
-            c, s = float(np.cos(yaw)), float(np.sin(yaw))
-            R_yaw_local = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-            R_grasp = base_R @ R_yaw_local
-            for z_off in z_offsets_m:
-                pos = anchor + float(z_off) * n
-                T = np.eye(4)
-                T[:3, :3] = R_grasp
-                T[:3, 3] = pos
-                candidates.append(T)
-    grasps_tip = np.stack(candidates, axis=0).astype(np.float32)
-
     base_offset = np.eye(4)
     base_offset[2, 3] = -gripper_depth_m
+
+    if not _VECTORIZE_CAND:
+        candidates = []
+        for p in positions_local:
+            anchor = face_origin_world + float(p) * in_plane_axis_world
+            for yaw in yaws:
+                c, s = float(np.cos(yaw)), float(np.sin(yaw))
+                R_yaw_local = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+                R_grasp = base_R @ R_yaw_local
+                for z_off in z_offsets_m:
+                    T = np.eye(4)
+                    T[:3, :3] = R_grasp
+                    T[:3, 3] = anchor + float(z_off) * n
+                    candidates.append(T)
+        grasps_tip = np.stack(candidates, axis=0).astype(np.float32)
+        return (grasps_tip @ base_offset).astype(np.float32)
+
+    # Vectorized over (positions P, yaws Y, z_offsets Z) — same nested order as
+    # `for p: for yaw: for z_off`, i.e. C-order reshape p-outer, yaw, z-inner.
+    positions_local = np.asarray(positions_local, dtype=np.float64)
+    yaws = np.asarray(yaws, dtype=np.float64)
+    z_offsets_m = np.asarray(z_offsets_m, dtype=np.float64)
+    P, Y, Z = len(positions_local), len(yaws), len(z_offsets_m)
+
+    cy, sy = np.cos(yaws), np.sin(yaws)
+    R_yaw = np.zeros((Y, 3, 3))
+    R_yaw[:, 0, 0] = cy
+    R_yaw[:, 0, 1] = -sy
+    R_yaw[:, 1, 0] = sy
+    R_yaw[:, 1, 1] = cy
+    R_yaw[:, 2, 2] = 1.0
+    R_grasp = base_R[None] @ R_yaw  # (Y, 3, 3)
+
+    anchors = (
+        face_origin_world[None, :]
+        + positions_local[:, None] * in_plane_axis_world[None, :]
+    )  # (P, 3)
+    pos = anchors[:, None, :] + z_offsets_m[None, :, None] * n[None, None, :]  # (P,Z,3)
+
+    T = np.zeros((P, Y, Z, 4, 4), dtype=np.float64)
+    T[..., 3, 3] = 1.0
+    T[:, :, :, :3, :3] = R_grasp[None, :, None, :, :]
+    T[:, :, :, :3, 3] = pos[:, None, :, :]
+    grasps_tip = T.reshape(P * Y * Z, 4, 4).astype(np.float32)
     return (grasps_tip @ base_offset).astype(np.float32)
 
 
@@ -279,6 +372,7 @@ def _run_obb_branch(
     skip_obb_rule: str,
     obb_density: str = "sparse",
     obb_position_spacing_m: float = 0.01,
+    object_embedding: Optional[torch.Tensor] = None,
 ):
     try:
         center, half_extent, R_obb = _compute_obb(pc_filtered, mode=obb_mode)
@@ -433,7 +527,11 @@ def _run_obb_branch(
             )
 
     scores = _score_grasps_with_discriminator(
-        grasps_world, pc_filtered_centered, pc_center, grasp_sampler
+        grasps_world,
+        pc_filtered_centered,
+        pc_center,
+        grasp_sampler,
+        object_embedding=object_embedding,
     )
     return grasps_world, scores, obb_dict, False
 
@@ -633,6 +731,10 @@ def run_graspmoe_batch(
             f"(sweep_volume[0]={gripper.sweep_volume[0]})."
         )
 
+    # NOTE: this L1 kNN outlier removal stays on CPU. Measured on the RTX 3090,
+    # the GPU path is ~3x slower per object — L1 (p=1) cdist has no matmul
+    # fast-path on GPU, so for a single ~3500-pt cloud the launch/transfer
+    # overhead dominates. (The OBB SOR is GPU-accelerated because it uses L2.)
     pc_filtered_list: list = []
     pc_removed_list: list = []
     for pc in object_pcs:
@@ -645,13 +747,17 @@ def run_graspmoe_batch(
         pc_filtered_list.append(f_t.cpu().numpy().astype(np.float32))
         pc_removed_list.append(r_t.cpu().numpy().astype(np.float32))
 
-    diff_results = GraspGenXSampler.run_inference_batch(
+    # Reuse the per-object discriminator embedding computed during diffusion-grasp
+    # scoring for the OBB-candidate scoring, so each object is encoded once
+    # instead of being re-encoded per object in the OBB branch.
+    diff_results, obj_embeddings = GraspGenXSampler.run_inference_batch(
         [pc for pc in pc_filtered_list],
         grasp_sampler,
         grasp_threshold=-1.0,
         num_grasps=num_grasps,
         topk_num_grasps=-1,
         remove_outliers=False,
+        return_object_embedding=True,
     )
 
     device = next(grasp_sampler.model.parameters()).device
@@ -704,6 +810,11 @@ def run_graspmoe_batch(
             skip_obb_rule=skip_obb_rule,
             obb_density=obb_density,
             obb_position_spacing_m=obb_position_spacing_m,
+            object_embedding=(
+                obj_embeddings[i]
+                if (_REUSE_OBJ_EMBED and obj_embeddings is not None)
+                else None
+            ),
         )
 
         if grasp_threshold > 0.0:

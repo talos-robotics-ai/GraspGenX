@@ -355,7 +355,16 @@ class GraspGenDiscriminator(nn.Module):
         if self.kappa is not None:
             depth = self.kappa * depth
 
-        if self.object_backbone in ("ptv3", "ptv3vanilla"):
+        # The object embedding depends only on the object point cloud, not on the
+        # grasps being scored. Callers may inject a precomputed per-object
+        # embedding (shape [num_objects_in_batch, num_object_dim]) to skip the
+        # encoder entirely — used by GraspMoE to avoid re-encoding each object.
+        cached_object_embedding = data.get("object_embedding", None)
+
+        if cached_object_embedding is None and self.object_backbone in (
+            "ptv3",
+            "ptv3vanilla",
+        ):
             depth = convert_to_ptv3_pc_format(depth, grid_size=self.grid_size)
 
         grasps_input = matrix_to_rt(grasps, self.grasp_repr, kappa=self.kappa)
@@ -397,12 +406,15 @@ class GraspGenDiscriminator(nn.Module):
 
         else:
             sample_embedding = self.sample_encoder(grasps_input)
-            object_embedding = self.object_encoder(
-                depth
-            )  # object_embedding size is [num_objects_in_batch, self.num_obs_dim]
-            object_embedding = object_embedding[
+            if cached_object_embedding is not None:
+                object_embedding_per_obj = cached_object_embedding
+            else:
+                object_embedding_per_obj = self.object_encoder(
+                    depth
+                )  # [num_objects_in_batch, self.num_obs_dim]
+            object_embedding = object_embedding_per_obj[
                 mask_batch
-            ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
+            ]  # Redistribute object embeddings to full batch -> [batch_size, num_obs_dim]
 
         if self.gripper_backbone == "onehot":
             gripper_embedding = self.gripper_encoder(data["onehot"])
@@ -476,6 +488,10 @@ class GraspGenDiscriminator(nn.Module):
             [num_objects_in_batch, num_grasps_per_batch, 1]
         )
         outputs["grasp_confidence"] = outputs["logits"].sigmoid()
+        # Expose the per-object embedding so callers can reuse it for additional
+        # scoring of the same objects without re-encoding (pose_repr == "mlp").
+        if self.pose_repr != "pc_feature":
+            outputs["object_embedding"] = object_embedding_per_obj
 
         if "labels" in data:
             labels = data["labels"]

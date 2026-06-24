@@ -109,6 +109,20 @@ def parse_args():
         help="Real-world format only: skip objects whose segmented PC has fewer points.",
     )
     parser.add_argument(
+        "--tensorrt",
+        action="store_true",
+        help="Accelerate the diffusion/discriminator heads with TensorRT "
+        "(opt-in; requires a working torch_tensorrt). Falls back to eager if "
+        "unavailable.",
+    )
+    parser.add_argument(
+        "--tensorrt_precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16"],
+        help="TensorRT precision when --tensorrt is set (default fp32).",
+    )
+    parser.add_argument(
         "--filter_collisions",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -244,7 +258,11 @@ def main():
     print(f"Loading gripper: {args.gripper_name}")
     print(f"Assets directory: {args.assets_dir}")
     grasp_sampler = GraspGenXSampler(
-        model_cfg, args.gripper_name, assets_dir=args.assets_dir
+        model_cfg,
+        args.gripper_name,
+        assets_dir=args.assets_dir,
+        use_tensorrt=args.tensorrt,
+        tensorrt_precision=args.tensorrt_precision,
     )
     gripper = grasp_sampler.get_gripper_info()
 

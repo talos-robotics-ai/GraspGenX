@@ -371,11 +371,13 @@ class HashSparseConv3d(nn.Module):
         found_mask = sorted_keys[positions] == neighbor_keys
         found_indices = sort_idx[positions]  # map back to original point indices
 
-        # Gather neighbor features; zeros where no neighbor exists
-        neighbor_feat = torch.zeros(
-            N * K3, self.in_channels, device=device, dtype=feat.dtype
-        )
-        neighbor_feat[found_mask] = feat[found_indices[found_mask]]
+        # Gather neighbor features; zeros where no neighbor exists.
+        # Fixed-shape formulation (export/TensorRT-friendly): `found_indices`
+        # are already valid (positions clamped to [0, N-1]), so the gather is
+        # always safe; multiplying by the found mask zeros out the entries that
+        # had no real neighbor. Numerically identical to the masked-assignment
+        # form `neighbor_feat[found_mask] = feat[found_indices[found_mask]]`.
+        neighbor_feat = feat[found_indices] * found_mask.unsqueeze(-1)
         neighbor_feat = neighbor_feat.view(N, K3, self.in_channels)
 
         # Apply per-offset weights and sum: (N, K3, Cin) x (K3, Cin, Cout) → (N, Cout)
