@@ -102,7 +102,7 @@ export GRASPGENX_CHECKPOINT_DIR=/path/to/your/graspgenx_checkpoints
 
 ### Gripper Config and Assets
 
-Each gripper needs a corresponding config file (with sweep volume information etc.) and URDF as an input to GraspGenX. We have already curated such gripper meta data for a host of popular grippers (see [gripper_descriptions](https://github.com/beininghan/gripper_descriptions)). This package is needed at runtime for running inference on supported grippers. This package is automatically cloned on the first import to `<repo_root>/ext/gripper_descriptions`, but if you have downloaded it elsewhere you'll have to specify the following ENV variable:
+Each gripper needs a corresponding config file (with sweep volume information etc.) and URDF as an input to GraspGenX. We have already curated such gripper meta data for a host of popular grippers (see [gripper_descriptions](https://huggingface.co/datasets/adithyamurali/gripper_descriptions)). This package is needed at runtime for running inference on supported grippers. This package is automatically cloned on the first import to `<repo_root>/ext/gripper_descriptions`, but if you have downloaded it elsewhere you'll have to specify the following ENV variable:
 ```bash
 export GRASPGENX_GRIPPER_CFG_DIR=/path/to/your/gripper_descriptions
 ```
@@ -271,7 +271,7 @@ uv run python scripts/demo_object_pc.py \
 
 ### Please upstream your gripper
 
-If you've onboarded a gripper that isn't already in [`gripper_descriptions`](https://github.com/beininghan/gripper_descriptions), please consider opening a PR with the saved `assets/x_grippers/<name>/` directory. The community benefits enormously from a growing library of curated grippers, and your config will let everyone else skip the wizard for that hand.
+If you've onboarded a gripper that isn't already in [`gripper_descriptions`](https://huggingface.co/datasets/adithyamurali/gripper_descriptions), please consider opening a PR with the saved `assets/x_grippers/<name>/` directory. The community benefits enormously from a growing library of curated grippers, and your config will let everyone else skip the wizard for that hand.
 
 ### Procedural Gripper Assets
 

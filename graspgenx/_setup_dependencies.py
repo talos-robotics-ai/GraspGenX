@@ -47,7 +47,7 @@ EXT_DIR = REPO_ROOT / "ext"
 # gripper_descriptions
 # ---------------------------------------------------------------------------
 
-GRIPPER_DESCRIPTIONS_URL = "https://github.com/beininghan/gripper_descriptions"
+GRIPPER_DESCRIPTIONS_URL = "https://huggingface.co/datasets/adithyamurali/gripper_descriptions"
 DEFAULT_GRIPPER_DESCRIPTIONS_DIR = EXT_DIR / "gripper_descriptions"
 
 # Override path entirely via env var (skips auto-clone — the path must exist).
