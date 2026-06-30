@@ -13,7 +13,8 @@ natively):
        "gripper_name": str (optional, falls back to default),
        "num_grasps": int = 200,
        "grasp_threshold": float = -1.0,
-       "topk_num_grasps": int = 100}`` →
+       "topk_num_grasps": int = 100,
+       "remove_outliers": bool = True}`` →
   ``{"grasps": (K,4,4) float32, "confidences": (K,) float32,
      "gripper_name": str, "timing": {"infer_ms": float}}``
 
@@ -147,6 +148,7 @@ class GraspGenXZMQServer:
         num_grasps = int(request.get("num_grasps", 200))
         grasp_threshold = float(request.get("grasp_threshold", -1.0))
         topk_num_grasps = int(request.get("topk_num_grasps", 100))
+        remove_outliers = bool(request.get("remove_outliers", True))
 
         sampler = self._get_sampler(gripper_name)
 
@@ -157,6 +159,7 @@ class GraspGenXZMQServer:
             grasp_threshold=grasp_threshold,
             num_grasps=num_grasps,
             topk_num_grasps=topk_num_grasps,
+            remove_outliers=remove_outliers,
         )
         infer_ms = (time.monotonic() - t0) * 1000.0
 
