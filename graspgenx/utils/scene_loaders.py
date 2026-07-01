@@ -153,13 +153,123 @@ def load_graspgenx_json_scene(json_path: str) -> dict:
     }
 
 
+def _load_ply_points_colors(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a point-cloud PLY -> (xyz (N,3) float32, rgb (N,3) uint8)."""
+    import trimesh
+
+    loaded = trimesh.load(path, process=False)
+    xyz = np.asarray(loaded.vertices, dtype=np.float32)
+    rgb = None
+    colors = getattr(loaded, "colors", None)
+    if colors is not None and len(colors) == len(xyz):
+        rgb = np.asarray(colors, dtype=np.uint8)[:, :3]
+    if rgb is None:
+        visual = getattr(loaded, "visual", None)
+        vc = getattr(visual, "vertex_colors", None) if visual is not None else None
+        if vc is not None and len(vc) == len(xyz):
+            rgb = np.asarray(vc, dtype=np.uint8)[:, :3]
+    if rgb is None:
+        rgb = np.full((len(xyz), 3), 160, dtype=np.uint8)
+    return xyz, rgb
+
+
+def _points_near_voxel(
+    scene_xyz: np.ndarray, obj_xyz: np.ndarray, radius: float
+) -> np.ndarray:
+    """Boolean mask over ``scene_xyz`` of points within ~``radius`` m of the
+    object cloud. Voxel-hash approximation (numpy-only, no scipy): a scene
+    point is 'near' if its voxel lies in the 26-neighborhood of any occupied
+    object voxel, i.e. within ~sqrt(3)*radius."""
+    if len(obj_xyz) == 0 or len(scene_xyz) == 0:
+        return np.zeros(len(scene_xyz), dtype=bool)
+    occ = set(map(tuple, np.floor(obj_xyz / radius).astype(np.int64)))
+    expanded = set()
+    for (x, y, z) in occ:
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    expanded.add((x + dx, y + dy, z + dz))
+    svox = np.floor(scene_xyz / radius).astype(np.int64)
+    return np.fromiter(
+        (tuple(v) in expanded for v in svox), dtype=bool, count=len(svox)
+    )
+
+
+def load_r2r2r_scene(manifest_path: str) -> dict:
+    """Load an R2R2R scene from a ``scene_pc.json`` manifest.
+
+    The manifest (paths relative to its own directory) looks like::
+
+        {
+          "format": "r2r2r_scene_pc",
+          "scene_pc": "scene_point_cloud.npz",   # keys: points (N,3), colors (N,3)
+          "objects": {"white_cube": "obj0.ply", "cardboard_box": "obj1.ply"},
+          "exclude_radius_m": 0.015
+        }
+
+    All clouds must be in the SAME metric (meters) world frame — for the
+    Polycam pipeline that is the Nerfstudio frame (``--world-frame nerfstudio``),
+    which matches the per-object ``point_cloud.ply`` exports.
+
+    A per-point scene segmentation (``_scene_seg``) is derived by proximity so
+    that :func:`build_scene_pc_excluding_object` can drop the target object's
+    own points before collision checking (otherwise every grasp on an object
+    would 'collide' with that object's surface in the scene cloud).
+    """
+    manifest_path = os.path.abspath(manifest_path)
+    base = os.path.dirname(manifest_path)
+    with open(manifest_path, "r") as f:
+        mani = json.load(f)
+
+    def _resolve(p: str) -> str:
+        return p if os.path.isabs(p) else os.path.join(base, p)
+
+    scene_data = np.load(_resolve(mani["scene_pc"]))
+    scene_xyz = np.asarray(scene_data["points"], dtype=np.float32)
+    if "colors" in scene_data:
+        scene_rgb = np.asarray(scene_data["colors"], dtype=np.uint8)[:, :3]
+    else:
+        scene_rgb = np.full((len(scene_xyz), 3), 160, dtype=np.uint8)
+
+    radius = float(mani.get("exclude_radius_m", 0.015))
+    scene_seg = np.full(len(scene_xyz), -1, dtype=np.int32)
+    objects: Dict[str, dict] = {}
+    for lid, (label, obj_path) in enumerate(mani["objects"].items()):
+        obj_xyz, obj_rgb = _load_ply_points_colors(_resolve(obj_path))
+        objects[label] = {"pc": obj_xyz, "rgb": obj_rgb, "label_id": int(lid)}
+        # Assign scene points near this object to its id (first-match wins for
+        # the rare overlap case; the objects in R2R2R scenes are separated).
+        near = _points_near_voxel(scene_xyz, obj_xyz, radius) & (scene_seg == -1)
+        scene_seg[near] = int(lid)
+
+    return {
+        "name": mani.get("name", Path(base).name),
+        "scene_xyz": scene_xyz,
+        "scene_rgb": scene_rgb,
+        "objects": objects,
+        "_scene_seg": scene_seg,
+        "_format": "r2r2r",
+    }
+
+
 def build_scene_pc_excluding_object(scene: dict, label: str) -> np.ndarray:
     """World-frame scene PC with the named object's pixels removed.
 
-    For real_world scenes this just indexes the cached ``_scene_seg`` aligned
-    to ``scene_xyz`` — no depth re-projection. For JSON scenes the loader
-    already excluded the (single) target, so we return ``scene_xyz`` as-is.
+    For real_world and r2r2r scenes this just indexes the cached ``_scene_seg``
+    aligned to ``scene_xyz`` — no depth re-projection. For JSON scenes the
+    loader already excluded the (single) target, so we return ``scene_xyz``
+    as-is.
     """
+    # r2r2r (and any future format) that ships a per-point seg aligned to
+    # scene_xyz: drop the target object's points by label id.
+    if scene.get("_format") == "r2r2r":
+        scene_xyz = np.asarray(scene["scene_xyz"], dtype=np.float32)
+        obj = scene["objects"].get(label)
+        scene_seg = scene.get("_scene_seg")
+        if obj is None or scene_seg is None:
+            return scene_xyz
+        return scene_xyz[np.asarray(scene_seg) != int(obj["label_id"])]
+
     if scene.get("_format") != "realworld":
         return np.asarray(scene["scene_xyz"], dtype=np.float32)
 
@@ -192,9 +302,30 @@ def build_scene_pc_excluding_object(scene: dict, label: str) -> np.ndarray:
     return scene_xyz[keep]
 
 
+def _find_r2r2r_manifest(sample_data_dir: str) -> str | None:
+    """Return the path to an R2R2R scene manifest in this dir, or None.
+
+    Recognized as either a file literally named ``scene_pc.json`` or any
+    ``*.json`` whose top-level ``format`` is ``"r2r2r_scene_pc"``."""
+    named = os.path.join(sample_data_dir, "scene_pc.json")
+    if os.path.isfile(named):
+        return named
+    for f in sorted(glob.glob(os.path.join(sample_data_dir, "*.json"))):
+        try:
+            with open(f, "r") as fh:
+                if json.load(fh).get("format") == "r2r2r_scene_pc":
+                    return f
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
 def detect_format(sample_data_dir: str) -> str:
-    """Return 'realworld' if the dir contains <NN>/meta_data.json subdirs,
-    'json' if it contains *.json files, else raise."""
+    """Return 'r2r2r' if the dir contains an R2R2R scene manifest, 'realworld'
+    if it contains <NN>/meta_data.json subdirs, 'json' if it contains *.json
+    files, else raise."""
+    if _find_r2r2r_manifest(sample_data_dir) is not None:
+        return "r2r2r"
     realworld_dirs = sorted(
         [
             d
@@ -222,6 +353,8 @@ def collect_scene_items(
     real-world mode.
     """
     fmt = detect_format(sample_data_dir)
+    if fmt == "r2r2r":
+        return [("r2r2r", _find_r2r2r_manifest(sample_data_dir))]
     if fmt == "realworld":
         all_dirs = sorted(
             [

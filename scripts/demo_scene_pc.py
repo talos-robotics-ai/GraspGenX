@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+import trimesh.transformations as tra
+import yaml
 
 from graspgenx.grasp_server import GraspGenXSampler
 from graspgenx.samplers import run_planner_on_batch
@@ -16,6 +18,7 @@ from graspgenx.utils.scene_loaders import (
     build_scene_pc_excluding_object,
     collect_scene_items,
     load_graspgenx_json_scene,
+    load_r2r2r_scene,
     load_realworld_scene,
 )
 from graspgenx.utils.viser_utils import (
@@ -150,7 +153,77 @@ def parse_args():
         default=2000,
         help="Surface samples drawn from the gripper collision mesh per check.",
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="If set, save the (collision-filtered) grasps + confidences for "
+        "each object as an Isaac-grasp YAML: "
+        "<output_dir>/<scene>__<label>__graspgenx_<gripper>_grasps.yml. Poses are "
+        "in the scene's world frame (metric).",
+    )
     return parser.parse_args()
+
+
+def _pause(msg: str) -> None:
+    """input() that tolerates a closed stdin (headless / piped runs)."""
+    try:
+        input(msg)
+    except EOFError:
+        pass
+
+
+def save_object_grasps_yaml(
+    output_dir: str,
+    scene_name: str,
+    label: str,
+    grasps: np.ndarray,
+    grasp_conf: np.ndarray,
+    gripper_name: str,
+    collision_filtered: bool,
+) -> str:
+    """Write one object's grasps (sorted by confidence, best first) as an
+    Isaac-grasp YAML and return the path."""
+    grasps = np.asarray(grasps, dtype=np.float64)
+    grasp_conf = np.asarray(grasp_conf, dtype=np.float64).reshape(-1)
+    order = np.argsort(-grasp_conf)
+
+    data = {
+        "format": "isaac_grasp",
+        "format_version": 1.0,
+        "metadata": {
+            "scene": scene_name,
+            "object": label,
+            "gripper_name": gripper_name,
+            "num_grasps": int(len(grasps)),
+            "collision_filtered": bool(collision_filtered),
+            "coordinate_frame": "scene world frame (metric)",
+            "sorted_by": "confidence_desc",
+        },
+        "grasps": {},
+    }
+    for rank, idx in enumerate(order):
+        g = grasps[idx]
+        quat = tra.quaternion_from_matrix(g)  # (w, x, y, z)
+        data["grasps"][f"grasp_{rank}"] = {
+            "confidence": float(grasp_conf[idx]),
+            "position": [float(v) for v in g[:3, 3]],
+            "orientation": {
+                "w": float(quat[0]),
+                "xyz": [float(v) for v in quat[1:]],
+            },
+        }
+
+    os.makedirs(output_dir, exist_ok=True)
+    safe_scene = str(scene_name).replace("/", "_")
+    safe_label = str(label).replace("/", "_")
+    out_path = os.path.join(
+        output_dir,
+        f"{safe_scene}__{safe_label}__graspgenx_{gripper_name}_grasps.yml",
+    )
+    with open(out_path, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    return out_path
 
 
 def visualize_grasps_for_object(
@@ -286,20 +359,29 @@ def main():
 
         if fmt_tag == "realworld":
             scene = load_realworld_scene(path, min_obj_points=args.min_obj_points)
+        elif fmt_tag == "r2r2r":
+            scene = load_r2r2r_scene(path)
         else:
             scene = load_graspgenx_json_scene(path)
 
-        # Render the full scene point cloud (world frame).
-        VIZ_BOUNDS = [[-1.5, -1.25, -0.15], [1.5, 1.25, 2.0]]
+        # Render the full scene point cloud (world frame). The VIZ_BOUNDS crop
+        # assumes a tabletop scene with a gravity-aligned, floor-near-zero frame
+        # (M2T2/JSON). The r2r2r Nerfstudio frame is not gravity-aligned, so
+        # skip the crop there and show the full scene. (Collision checking always
+        # uses the full, uncropped scene via build_scene_pc_excluding_object.)
         xyz_scene = scene["scene_xyz"]
         rgb_scene = scene["scene_rgb"]
-        m = np.all((xyz_scene > VIZ_BOUNDS[0]) & (xyz_scene < VIZ_BOUNDS[1]), axis=1)
-        xyz_scene, rgb_scene = xyz_scene[m], rgb_scene[m]
+        if fmt_tag != "r2r2r":
+            VIZ_BOUNDS = [[-1.5, -1.25, -0.15], [1.5, 1.25, 2.0]]
+            m = np.all(
+                (xyz_scene > VIZ_BOUNDS[0]) & (xyz_scene < VIZ_BOUNDS[1]), axis=1
+            )
+            xyz_scene, rgb_scene = xyz_scene[m], rgb_scene[m]
         visualize_pointcloud(vis, "pc_scene", xyz_scene, rgb_scene, size=0.0025)
 
         if not scene["objects"]:
             print("  No segmented objects found; skipping.")
-            input("Press Enter to continue to next scene...")
+            _pause("Press Enter to continue to next scene...")
             continue
 
         # Render all object point clouds up front so the user sees the
@@ -373,11 +455,25 @@ def main():
                 f"(diff={tags.count('diff')}, obb={tags.count('obb')}); "
                 f"score range {conf.min():.3f}..{conf.max():.3f}"
             )
+            if args.output_dir:
+                out_path = save_object_grasps_yaml(
+                    args.output_dir,
+                    scene["name"],
+                    label,
+                    grasps,
+                    conf,
+                    args.gripper_name,
+                    collision_filtered=args.filter_collisions,
+                )
+                print(
+                    f"  [{label}] best confidence {float(np.max(conf)):.3f}; "
+                    f"saved {len(grasps)} grasps -> {out_path}"
+                )
             visualize_grasps_for_object(
                 vis, label, grasps, conf, tags, obb_dict, gripper, args
             )
 
-        input("\nPress Enter to continue to next scene...")
+        _pause("\nPress Enter to continue to next scene...")
 
 
 if __name__ == "__main__":
