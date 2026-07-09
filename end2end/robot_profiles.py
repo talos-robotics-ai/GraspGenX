@@ -544,11 +544,117 @@ class UR10eGripperProfile(RobotProfile):
         return None
 
 
+@dataclass
+class G1Dex3Profile(RobotProfile):
+    """Unitree G1 humanoid + Dex3 right hand (SAGE-Grasp assets).
+
+    Only the **right arm** (7 joints) is planned by cuRobo — the pipeline's
+    single ``robot_base_T`` roots the cuRobo model at the URDF's ``pelvis``,
+    with the legs, waist, left arm and both hands *locked* at the AMO standing
+    pose in ``curobo_assets/g1_dex3.yml`` (see ``build_g1_dex3.py``). The right
+    Dex3 hand (7 revolute finger joints, baked into ``g1_body29_hand14.urdf``)
+    is the gripper; GraspGenX predicts grasps for it under the ``unitree_g1``
+    gripper name.
+
+    Stage A drives this as a fixed-base arm (mirrors the Franka demo). Stage B
+    unlocks the legs+waist and hands them to the AMO policy inside Newton; the
+    ``amo_*`` / ``lower_body_*`` fields below carry the config that stage needs
+    and are unused in Stage A.
+    """
+
+    NAME: str = "g1_dex3"
+
+    # Right-arm chain, in the cuRobo cspace order (g1_dex3.yml).
+    arm_joint_names: List[str] = field(
+        default_factory=lambda: [
+            "right_shoulder_pitch_joint",
+            "right_shoulder_roll_joint",
+            "right_shoulder_yaw_joint",
+            "right_elbow_joint",
+            "right_wrist_roll_joint",
+            "right_wrist_pitch_joint",
+            "right_wrist_yaw_joint",
+        ]
+    )
+    tool_frame: str = "right_hand_palm_link"
+    # AMO standing seed for the right arm (default_dof_pos[22:29]).
+    default_arm_q: List[float] = field(
+        default_factory=lambda: [0.5, 0.0, -0.2, 0.3, 0.0, 0.0, 0.0]
+    )
+    curobo_robot_config: str = "../curobo_assets/g1_dex3.yml"
+
+    # The 7 right Dex3 finger joints the demo drives (open extended, close curl).
+    # Values respect the URDF limits; tuned coarsely — calibrate against the
+    # GraspGenX ``unitree_g1`` gripper config.json for a tighter power grasp.
+    gripper_joint_names: List[str] = field(
+        default_factory=lambda: [
+            "right_hand_thumb_0_joint",
+            "right_hand_thumb_1_joint",
+            "right_hand_thumb_2_joint",
+            "right_hand_middle_0_joint",
+            "right_hand_middle_1_joint",
+            "right_hand_index_0_joint",
+            "right_hand_index_1_joint",
+        ]
+    )
+    gripper_open: Dict[str, float] = field(
+        default_factory=lambda: {
+            "right_hand_thumb_0_joint": 0.0,
+            "right_hand_thumb_1_joint": 0.0,
+            "right_hand_thumb_2_joint": 0.0,
+            "right_hand_middle_0_joint": 0.0,
+            "right_hand_middle_1_joint": 0.0,
+            "right_hand_index_0_joint": 0.0,
+            "right_hand_index_1_joint": 0.0,
+        }
+    )
+    gripper_close: Dict[str, float] = field(
+        default_factory=lambda: {
+            "right_hand_thumb_0_joint": 0.0,
+            "right_hand_thumb_1_joint": -0.6,
+            "right_hand_thumb_2_joint": -1.2,
+            "right_hand_middle_0_joint": 1.3,
+            "right_hand_middle_1_joint": 1.4,
+            "right_hand_index_0_joint": 1.3,
+            "right_hand_index_1_joint": 1.4,
+        }
+    )
+    gripper_control_mode: str = "position"
+    # Distal finger links carry the object-contact concavity worth CoACD-ing;
+    # the palm + proximal phalanges stay convex-hull. (Dynamic mode only.)
+    coacd_link_keywords: Tuple[str, ...] = ("thumb_2", "middle_1", "index_1")
+
+    # -- Stage B (AMO lower body) — consumed by the Newton dynamic controller --
+    # 15 lower-body joints AMO owns (legs + waist), in the canonical G1 order.
+    lower_body_joint_names: List[str] = field(
+        default_factory=lambda: [
+            "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+            "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+            "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+            "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+        ]
+    )
+    # AMO policy checkpoints (SAGE-Grasp). ${SAGE} expands via end2end/paths.py.
+    amo_checkpoints: Dict[str, str] = field(
+        default_factory=lambda: {
+            "amo_policy": "${SAGE}/checkpoints/amo_jit.pt",
+            "adapter": "${SAGE}/checkpoints/adapter_jit.pt",
+            "adapter_norm_stats": "${SAGE}/checkpoints/adapter_norm_stats.pt",
+        }
+    )
+
+    def gripper_pad_links(self) -> Tuple[str, str] | None:
+        # 3-finger hand — no 2-link pad pair; disable the object-aware gap close.
+        return None
+
+
 ROBOT_PROFILES: Dict[str, type] = {
     UR10eRobotiq2F140Profile.NAME: UR10eRobotiq2F140Profile,
     FrankaPandaProfile.NAME: FrankaPandaProfile,
     UR10eInspireHandProfile.NAME: UR10eInspireHandProfile,
     UR10eGripperProfile.NAME: UR10eGripperProfile,
+    G1Dex3Profile.NAME: G1Dex3Profile,
 }
 
 

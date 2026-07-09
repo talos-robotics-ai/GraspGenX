@@ -13,6 +13,9 @@ anywhere. Robot YAMLs reference external assets with ``${...}`` tokens that
                         ``ext/gripper_descriptions``).
   ``${E2E}``            this ``end2end/`` directory.
   ``${REPO}``           the GraspGenX repo root.
+  ``${SAGE}``           the sibling ``SAGE-Grasp`` checkout (G1 + Dex3 URDFs
+                        and AMO policy checkpoints), overridable via
+                        ``$GRASPGENX_SAGE_DIR``.
 
 ``load_yaml`` runs every loaded config through :func:`expand`, so configs
 without ``${`` tokens (e.g. env YAMLs with repo-relative mesh paths) pass
@@ -62,6 +65,28 @@ def grippers_dir() -> Path:
     return Path(get_gripper_descriptions_assets())
 
 
+@lru_cache(maxsize=None)
+def sage_dir() -> Path:
+    """The sibling ``SAGE-Grasp`` checkout (G1 + Dex3 assets, AMO checkpoints).
+
+    Honors ``$GRASPGENX_SAGE_DIR``; otherwise looks for ``SAGE-Grasp`` next to
+    the GraspGenX repo (the layout in ``talos-dev``). Raises a clear error if
+    it can't be found so a G1 config fails loudly instead of resolving to a
+    bogus path.
+    """
+    override = os.environ.get("GRASPGENX_SAGE_DIR")
+    candidates = [Path(override)] if override else []
+    candidates.append(REPO_ROOT.parent / "SAGE-Grasp")
+    for c in candidates:
+        if (c / "assets/g1/g1_body29_hand14.urdf").is_file():
+            return c
+    raise FileNotFoundError(
+        "Could not locate the SAGE-Grasp checkout (needed for the G1 + Dex3 "
+        "assets/checkpoints). Set $GRASPGENX_SAGE_DIR or clone SAGE-Grasp "
+        f"next to the GraspGenX repo. Tried: {[str(c) for c in candidates]}"
+    )
+
+
 # Token name -> zero-arg resolver. Lazily evaluated so a config that never
 # uses ${CUROBO_ASSETS}/${GRIPPERS} never imports cuRobo/GraspGenX.
 _RESOLVERS = {
@@ -69,6 +94,7 @@ _RESOLVERS = {
     "${REPO}": lambda: str(REPO_ROOT),
     "${CUROBO_ASSETS}": lambda: str(curobo_assets_dir()),
     "${GRIPPERS}": lambda: str(grippers_dir()),
+    "${SAGE}": lambda: str(sage_dir()),
 }
 
 
