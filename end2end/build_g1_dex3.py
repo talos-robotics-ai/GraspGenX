@@ -42,7 +42,7 @@ import numpy as np
 import trimesh
 import yaml
 
-from paths import sage_dir
+from paths import curobo_assets_dir, sage_dir
 
 _HERE = Path(__file__).resolve().parent
 CUROBO_ASSETS = _HERE / "curobo_assets"
@@ -131,6 +131,33 @@ def _geom_to_mesh(geom, origin, asset_root: Path):
         return None
     m.apply_transform(T)
     return m
+
+
+def _shipped_g1_spheres() -> dict:
+    """Load cuRobo's shipped, validated G1 collision spheres, keyed by link.
+
+    The fork ships ``content/configs/robot/unitree_g1.yml`` — a proper cuRobo
+    config for this exact robot with dense, hand-tuned per-link spheres and the
+    same link names as the SAGE URDF. Preferring these over our coarse OBB fits
+    is what makes cuRobo stop reporting false self-collisions. Returns {} if the
+    shipped config can't be found (then everything falls back to OBB).
+    """
+    cfg_path = curobo_assets_dir().parent / "configs/robot/unitree_g1.yml"
+    if not cfg_path.is_file():
+        return {}
+    doc = yaml.safe_load(cfg_path.read_text())
+
+    def _find(x):
+        if isinstance(x, dict):
+            if "collision_spheres" in x:
+                return x["collision_spheres"]
+            for v in x.values():
+                r = _find(v)
+                if r is not None:
+                    return r
+        return None
+
+    return _find(doc) or {}
 
 
 def _link_collision_mesh(urdf, link_name: str, asset_root: Path):
@@ -269,15 +296,22 @@ def build(output: Path) -> Path:
                               load_meshes=False)
 
     print(f"[build_g1_dex3] URDF: {urdf_path}")
+    shipped = _shipped_g1_spheres()
+    if shipped:
+        print(f"[build_g1_dex3] using shipped cuRobo G1 spheres ({len(shipped)} links)")
     collision_spheres = {}
     for link in COLLISION_LINKS:
+        if link in shipped:
+            collision_spheres[link] = shipped[link]
+            print(f"  {link:28} {len(shipped[link]):2d} spheres (shipped)")
+            continue
         mesh = _link_collision_mesh(urdf, link, asset_root)
         if mesh is None:
             print(f"  ! no collision mesh for {link}; skipping")
             continue
         spheres = _fit_spheres(mesh)
         collision_spheres[link] = spheres
-        print(f"  {link:28} {len(spheres):2d} spheres")
+        print(f"  {link:28} {len(spheres):2d} spheres (OBB fallback)")
 
     present = [l for l in COLLISION_LINKS if l in collision_spheres]
 

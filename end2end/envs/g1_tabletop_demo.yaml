@@ -17,19 +17,20 @@ assets:
     # front edge (x≈0.12) clears the robot's body, while the object sits near
     # the front edge (offset −0.24) at x≈0.28.
     type: procedural_table
-    params: {width: 0.8, depth: 0.8, height: 0.82, thickness: 0.04, leg_thickness: 0.05}
-    pose: {translation: [0.50, -0.10, 0.41], quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]}
+    params: {width: 0.8, depth: 0.7, height: 0.74, thickness: 0.04, leg_thickness: 0.05}
+    pose: {translation: [0.53, -0.10, 0.37], quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]}
     support_label: table_top
     collision: cuboid_from_extents
 
 object_slot:
   parent: table
   surface: table_top
-  # Close to the shoulder (~0.30 m) so grasp *orientations* are reachable, not
-  # just the position: table center x=0.50 + offset −0.26 → object x≈0.24, and
-  # the tall table puts it near shoulder height (~0.90 m) so the arm stays clear
-  # above the table top (0.82 m).
-  translation_offset: [-0.26, 0.0, 0.0]
+  # Placed at the right arm's workspace sweet spot (FK-mapped): close to the body
+  # (x≈0.20) and moderately high (z≈0.82) so the arm reaches it in a compact,
+  # non-extended pose with maximum orientation freedom — that is what makes a
+  # useful fraction of the GraspGenX grasps reachable (vs ~1/80 at the reach
+  # edge). table center x=0.53 + offset −0.33 → object x≈0.20.
+  translation_offset: [-0.33, 0.0, 0.0]
   upright: true
   mesh_scale: 0.001
   pre_rotation: [1.0, 0.0, 0.0, 90.0]
