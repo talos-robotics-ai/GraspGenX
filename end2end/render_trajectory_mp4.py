@@ -211,6 +211,7 @@ def _build_scene(
     height: int,
     show_grasps: bool,
     skip_link_names: Optional[List[str]] = None,
+    grasp_overlay: str = "all",
 ) -> Optional[pyrender.Scene]:
     # Per-frame camera takes priority over the trajectory's global camera —
     # used by wrist/in-hand camera renders where the camera moves with a link.
@@ -288,13 +289,20 @@ def _build_scene(
         color = OBJECT_COLOR if pname == "object" else ROBOT_COLOR
         _add_mesh(scene, m, T, color)
 
-    # Optional grasp overlay
-    if show_grasps:
+    # Optional grasp overlay. grasp_overlay controls how much is drawn:
+    #   "all"    – the full GraspGen candidate cloud plus the chosen grasp (default;
+    #              matches the franka demos). Note the candidate frames sit at the
+    #              hand-BASE, ~1 finger-length off the object, so they read as a
+    #              cloud offset from the object — expected, not a placement bug.
+    #   "chosen" – only the picked grasp triad (clean "hand-grasps-object" view).
+    #   "none"   – no grasp overlay at all.
+    if show_grasps and grasp_overlay != "none":
         grasps = (traj.get("annotations") or {}).get("all_grasps") or []
         target_grasp = (traj.get("annotations") or {}).get("target_grasp_transform")
         # Render grasps as small coordinate-frame triads using thin cylinders.
-        for g in grasps:
-            _draw_frame(scene, np.asarray(g, dtype=float), length=0.04, radius=0.002)
+        if grasp_overlay == "all":
+            for g in grasps:
+                _draw_frame(scene, np.asarray(g, dtype=float), length=0.04, radius=0.002)
         if target_grasp is not None:
             _draw_frame(
                 scene,
@@ -358,6 +366,7 @@ def render(
     fps_override: int,
     show_grasps: bool,
     skip_link_names: Optional[List[str]] = None,
+    grasp_overlay: str = "all",
 ):
     traj = json.loads(traj_path.read_text())
     frames = traj.get("frames", [])
@@ -400,6 +409,7 @@ def render(
                 height,
                 show_grasps,
                 skip_link_names=skip_link_names,
+                grasp_overlay=grasp_overlay,
             )
             if scene is None:
                 continue
@@ -464,6 +474,14 @@ def main():
         "--show-grasps",
         action="store_true",
         help="Overlay predicted grasps + target grasp on every frame",
+    )
+    ap.add_argument(
+        "--grasp-overlay",
+        choices=("all", "chosen", "none"),
+        default="all",
+        help="With --show-grasps: 'all' draws the full candidate cloud + chosen "
+        "grasp (default); 'chosen' draws only the picked grasp (clean view, no "
+        "offset candidate cloud); 'none' draws nothing.",
     )
     ap.add_argument(
         "--skip-link",
@@ -532,6 +550,7 @@ def main():
         fps_override=args.fps,
         show_grasps=args.show_grasps,
         skip_link_names=args.skip_link,
+        grasp_overlay=args.grasp_overlay,
     )
 
 

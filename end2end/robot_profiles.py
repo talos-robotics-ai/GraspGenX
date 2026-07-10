@@ -546,7 +546,7 @@ class UR10eGripperProfile(RobotProfile):
 
 @dataclass
 class G1Dex3Profile(RobotProfile):
-    """Unitree G1 humanoid + Dex3 right hand (SAGE-Grasp assets).
+    """Unitree G1 humanoid + Dex3 right hand (assets vendored under end2end/robots/g1).
 
     Only the **right arm** (7 joints) is planned by cuRobo — the pipeline's
     single ``robot_base_T`` roots the cuRobo model at the URDF's ``pelvis``,
@@ -635,12 +635,15 @@ class G1Dex3Profile(RobotProfile):
             "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
         ]
     )
-    # AMO policy checkpoints (SAGE-Grasp). ${SAGE} expands via end2end/paths.py.
+    # AMO policy checkpoints, vendored under end2end/robots/g1/amo_policy/
+    # (${E2E} expands via end2end/paths.py). Used by Stage B (AMO lower body).
+    # Dir is amo_policy/ (not checkpoints/) so the repo's global checkpoints/
+    # .gitignore rule doesn't swallow the vendored weights.
     amo_checkpoints: Dict[str, str] = field(
         default_factory=lambda: {
-            "amo_policy": "${SAGE}/checkpoints/amo_jit.pt",
-            "adapter": "${SAGE}/checkpoints/adapter_jit.pt",
-            "adapter_norm_stats": "${SAGE}/checkpoints/adapter_norm_stats.pt",
+            "amo_policy": "${E2E}/robots/g1/amo_policy/amo_jit.pt",
+            "adapter": "${E2E}/robots/g1/amo_policy/adapter_jit.pt",
+            "adapter_norm_stats": "${E2E}/robots/g1/amo_policy/adapter_norm_stats.pt",
         }
     )
 

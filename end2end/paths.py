@@ -13,9 +13,9 @@ anywhere. Robot YAMLs reference external assets with ``${...}`` tokens that
                         ``ext/gripper_descriptions``).
   ``${E2E}``            this ``end2end/`` directory.
   ``${REPO}``           the GraspGenX repo root.
-  ``${SAGE}``           the sibling ``SAGE-Grasp`` checkout (G1 + Dex3 URDFs
-                        and AMO policy checkpoints), overridable via
-                        ``$GRASPGENX_SAGE_DIR``.
+  ``${G1}``             the vendored G1 + Dex3 assets under
+                        ``end2end/robots/g1`` (URDF, meshes, AMO checkpoints).
+                        Self-contained in the repo — no external checkout.
 
 ``load_yaml`` runs every loaded config through :func:`expand`, so configs
 without ``${`` tokens (e.g. env YAMLs with repo-relative mesh paths) pass
@@ -66,24 +66,21 @@ def grippers_dir() -> Path:
 
 
 @lru_cache(maxsize=None)
-def sage_dir() -> Path:
-    """The sibling ``SAGE-Grasp`` checkout (G1 + Dex3 assets, AMO checkpoints).
+def g1_assets_dir() -> Path:
+    """The vendored G1 + Dex3 assets under ``end2end/robots/g1``.
 
-    Honors ``$GRASPGENX_SAGE_DIR``; otherwise looks for ``SAGE-Grasp`` next to
-    the GraspGenX repo (the layout in ``talos-dev``). Raises a clear error if
-    it can't be found so a G1 config fails loudly instead of resolving to a
-    bogus path.
+    Self-contained in the repo (URDF, meshes, AMO policy checkpoints) — no
+    external SAGE-Grasp checkout is needed. Raises a clear error if the vendored
+    URDF is missing so a G1 config fails loudly instead of resolving to a bogus
+    path.
     """
-    override = os.environ.get("GRASPGENX_SAGE_DIR")
-    candidates = [Path(override)] if override else []
-    candidates.append(REPO_ROOT.parent / "SAGE-Grasp")
-    for c in candidates:
-        if (c / "assets/g1/g1_body29_hand14.urdf").is_file():
-            return c
+    d = E2E_DIR / "robots/g1"
+    if (d / "g1_body29_hand14.urdf").is_file():
+        return d
     raise FileNotFoundError(
-        "Could not locate the SAGE-Grasp checkout (needed for the G1 + Dex3 "
-        "assets/checkpoints). Set $GRASPGENX_SAGE_DIR or clone SAGE-Grasp "
-        f"next to the GraspGenX repo. Tried: {[str(c) for c in candidates]}"
+        f"Vendored G1 assets not found under {d} (expected "
+        "g1_body29_hand14.urdf + meshes/). The repo should ship them; "
+        "re-add end2end/robots/g1 if it was removed."
     )
 
 
@@ -94,7 +91,7 @@ _RESOLVERS = {
     "${REPO}": lambda: str(REPO_ROOT),
     "${CUROBO_ASSETS}": lambda: str(curobo_assets_dir()),
     "${GRIPPERS}": lambda: str(grippers_dir()),
-    "${SAGE}": lambda: str(sage_dir()),
+    "${G1}": lambda: str(g1_assets_dir()),
 }
 
 

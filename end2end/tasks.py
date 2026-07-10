@@ -447,11 +447,20 @@ class PickAndDropInBinTask(PickAndLiftTask):
         while pos_np.ndim > 2:
             pos_np = pos_np[0]
         pos_np = pos_np.astype(np.float32)
-        # Slice off any planner-extra dofs (e.g. cuRobo's franka.yml
-        # has 9 cspace dofs but our profile only treats the 7 arm
-        # joints as 'arm' — we appended the gripper schedule ourselves).
+        # Slice off any planner-extra dofs (e.g. cuRobo's franka.yml has 9 cspace
+        # dofs but our profile only treats the 7 arm joints as 'arm'). Select the
+        # active-arm columns *by name* when the trajectory exposes joint_names:
+        # cuRobo orders columns by the kinematic chain, so locked joints that
+        # precede the arm (the G1's waist) would corrupt a positional [:n_arm]
+        # slice. Falls back to the positional slice when names are unavailable.
         n_arm = profile.n_arm
-        if pos_np.shape[1] > n_arm:
+        jn = getattr(traj, "joint_names", None)
+        want = list(getattr(planner, "joint_names", []) or [])
+        if jn is not None and want and pos_np.shape[1] == len(jn) and all(
+            w in jn for w in want
+        ):
+            pos_np = pos_np[:, [jn.index(w) for w in want]]
+        elif pos_np.shape[1] > n_arm:
             pos_np = pos_np[:, :n_arm]
         # cuRobo's plan_pose interpolated_trajectory pads the trajectory
         # to a fixed length (~5000 frames) by holding the goal config

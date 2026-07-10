@@ -26,7 +26,7 @@ Design (see ``docs/g1_dex3_end2end.md``):
 Output (``end2end/curobo_assets/g1_dex3.yml``) uses the pipeline's
 ``ABSOLUTE_PATH_PLACEHOLDER_*`` tokens for the URDF + asset root, which
 ``e2e_grasp_demo.resolve_curobo_robot_dict`` substitutes from the robot YAML
-(``${SAGE}/assets/g1/...``) at load time — so the committed file is portable.
+(``${E2E}/robots/g1/...``) at load time — so the committed file is portable.
 
 Run::
 
@@ -42,7 +42,7 @@ import numpy as np
 import trimesh
 import yaml
 
-from paths import curobo_assets_dir, sage_dir
+from paths import curobo_assets_dir, g1_assets_dir
 
 _HERE = Path(__file__).resolve().parent
 CUROBO_ASSETS = _HERE / "curobo_assets"
@@ -79,6 +79,15 @@ AMO_STANDING = np.array([
 RIGHT_ARM_JOINTS = G1_BODY_JOINTS[22:29]
 RIGHT_ARM_STANDING = AMO_STANDING[22:29]
 
+# The cspace default / plan start seed: a "ready" pose with the right palm
+# hovering just above the tabletop object, pointing down (FK-found). Starting
+# cuRobo's plan from here — instead of the raised standing arm — is what lets the
+# trajectory optimiser converge on the full approach→grasp→lift. (A raised
+# standing seed does not converge.) Keep it in sync with default_joint_position
+# in robots/g1_dex3.yaml. See docs §9.8 for the accompanying cuRobo-fork fix that
+# locked joints require.
+RIGHT_ARM_READY = [0.5, 0.0, -0.2, 1.5708, 0.0, 0.0, 0.0]
+
 # Dex3 right-hand joints (baked into g1_body29_hand14.urdf). Locked open (0)
 # for arm planning — the grasp close is driven by the robot profile, not cuRobo.
 RIGHT_HAND_JOINTS = [
@@ -97,13 +106,25 @@ ARM_CHAIN = [
     "right_wrist_yaw_link", "right_hand_palm_link",
 ]
 BODY_LINKS = ["pelvis", "torso_link"]
+# The Dex3 finger links MUST be in the collision model too — otherwise cuRobo
+# never checks the fingers against the world (table/box) and plans the open hand
+# straight through the tabletop (the fingers dip ~17 cm below the table top with
+# no penalty). The shipped unitree_g1.yml ships validated spheres for all of
+# them. (Their inter-finger rest-pose overlaps are handled by the FK-derived
+# self_collision_ignore; cuRobo plans with the fingers locked open, so they move
+# rigidly with the palm.)
+HAND_LINKS = [
+    "right_hand_thumb_0_link", "right_hand_thumb_1_link", "right_hand_thumb_2_link",
+    "right_hand_index_0_link", "right_hand_index_1_link",
+    "right_hand_middle_0_link", "right_hand_middle_1_link",
+]
 # NOTE: the left arm is intentionally *excluded* from the collision model. It is
 # locked in the AMO standing pose (left_shoulder_pitch=0.5, i.e. raised forward),
 # which sits inside the right arm's forward workspace; including its coarse
 # spheres made cuRobo flag a self-collision for essentially every right-arm
 # grasp config. A right-arm reach to a tabletop object in front-right never
 # actually strikes the left arm, so dropping it removes the false positives.
-COLLISION_LINKS = BODY_LINKS + ARM_CHAIN
+COLLISION_LINKS = BODY_LINKS + ARM_CHAIN + HAND_LINKS
 
 
 def _geom_to_mesh(geom, origin, asset_root: Path):
@@ -271,27 +292,19 @@ def _self_collision_ignore(present: list[str], collision_spheres: dict,
                 ignore[a].add(b)
                 ignore[b].add(a)
 
-    # Also ignore the arm against its own base body (torso + pelvis). Those
-    # links carry coarse OBB spheres that falsely collide with the arm as it
-    # sweeps near the trunk (the FK overlap check only covers the *standing*
-    # pose, not the whole motion). The real arm can't strike its own base for a
-    # tabletop reach in front of the robot, so this removes false positives
-    # while keeping arm↔arm and arm↔left-stub checks intact.
-    base_body = {"torso_link", "pelvis"} & set(present)
-    arm_links = [l for l in ARM_CHAIN if l in present]
-    for base in base_body:
-        for arm in arm_links:
-            ignore[base].add(arm)
-            ignore[arm].add(base)
+    # NOTE: torso/pelvis are deliberately NOT blanket-ignored against the arm.
+    # With the validated shipped spheres those checks are accurate (no false
+    # positives at rest), so keeping them on stops cuRobo planning the arm
+    # *through* the trunk. Only the genuine rest-pose overlaps found above are
+    # ignored (structurally-adjacent links whose spheres nest at standing).
     return {l: sorted(v) for l, v in ignore.items() if v}
 
 
 def build(output: Path) -> Path:
     import yourdfpy
 
-    sage = sage_dir()
-    urdf_path = sage / "assets/g1/g1_body29_hand14.urdf"
-    asset_root = sage / "assets/g1"
+    urdf_path = g1_assets_dir() / "g1_body29_hand14.urdf"
+    asset_root = g1_assets_dir()
     urdf = yourdfpy.URDF.load(str(urdf_path), build_collision_scene_graph=False,
                               load_meshes=False)
 
@@ -348,26 +361,41 @@ def build(output: Path) -> Path:
                     "max_jerk": 500.0,
                     "position_limit_clip": 0.0,
                     "default_joint_position": [round(float(v), 4)
-                                               for v in RIGHT_ARM_STANDING],
+                                               for v in RIGHT_ARM_READY],
                 },
                 # A dedicated grasp/TCP frame. The pipeline assumes the tool
-                # frame's +Z is the approach/lift axis (grasp_approach_axis="z"),
-                # but the Dex3 palm approaches along its +X (fingers extend +X in
-                # right_hand_palm_link). So attach a fixed frame rotated +90°
-                # about the palm's Y, making the TCP's +Z coincide with the
-                # palm's +X — i.e. the real finger/approach direction. cuRobo
-                # then drives *this* frame to the GraspGenX grasp pose, so both
-                # the grasp orientation and the approach/lift waypoints are
-                # correct (grasp_to_tool_transform can stay identity).
+                # frame's +Z is the approach/lift axis (grasp_approach_axis="z")
+                # and cuRobo drives *this* frame to the raw GraspGenX grasp pose
+                # (grasp_to_tool_transform stays identity). So right_dex3_tcp must
+                # coincide with GraspGenX's *canonical grasp frame* for the
+                # `unitree_g1` gripper, expressed relative to right_hand_palm_link.
+                #
+                # That frame is NOT any URDF triad: GraspGen predicts in a gripper-
+                # normalised convention (+Z approach, +X finger-closing). For the
+                # x-gripper `unitree_g1` it is exactly the gripper URDF's ROOT
+                # ("world") link — verified: the shipped points.json cloud matches
+                # the gripper URDF sampled in its world frame to 2.6 mm, and there
+                # is NO extra asset→convention offset for x-grippers. The gripper's
+                # own world_joint gives  world(grasp) → right_palm_link:
+                #     J = T([0.07,0,0.02]) · R(rpy=[90°,0,180°])
+                # and the G1's right_hand_palm_link coincides with the gripper's
+                # right_palm_link (rigid palm-mesh ICP → R≈I, ≤0.1 mm). So the TCP,
+                # as a frame fixed to the palm, is  palm → grasp = J⁻¹.
+                #
+                # Empirically checked: driving this TCP to a GraspGen grasp places
+                # the full G1 hand with **0 %** box penetration and coincident with
+                # GraspGen's own gripper cloud, vs 16 % with the old R_y(90°) guess
+                # (which dropped J's [0.07,0,0.02] offset + roll → wrong seat). See
+                # docs §9.11.
                 "extra_links": {
                     "right_dex3_tcp": {
                         "parent_link_name": "right_hand_palm_link",
                         "link_name": "right_dex3_tcp",
                         "joint_name": "right_dex3_tcp_joint",
                         "joint_type": "FIXED",
-                        # [x, y, z, qw, qx, qy, qz]; quat = R_y(+90°).
-                        "fixed_transform": [0.0, 0.0, 0.0,
-                                            0.70710678, 0.0, 0.70710678, 0.0],
+                        # [x, y, z, qw, qx, qy, qz] = J⁻¹ (world_joint inverse).
+                        "fixed_transform": [0.07, -0.02, 0.0,
+                                            0.0, 0.0, -0.70710678, -0.70710678],
                     }
                 },
                 "tool_frames": ["right_dex3_tcp"],

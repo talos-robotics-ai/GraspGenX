@@ -10,27 +10,32 @@ name: g1_tabletop_demo
 assets:
   - id: table
     # Counter-height table placed at a realistic standing distance. The G1's
-    # right shoulder is at world ≈ (0, −0.10, 1.08) and the right arm reaches
-    # ~0.45 m; an FK sweep shows the object is comfortably reachable at world
-    # ≈ [0.28, −0.10, 0.83] (33/15000 sampled configs within 6 cm). height=0.75
-    # + pose z=0.375 → top at 0.75 m; the table center sits at x=0.52 so its
-    # front edge (x≈0.12) clears the robot's body, while the object sits near
-    # the front edge (offset −0.24) at x≈0.28.
+    # right shoulder is at world ≈ (0, −0.10, 1.08) and a DLS-IK reach sweep of
+    # the fixed-base standing pose shows the right palm reaches top-down grasps
+    # out to x≈0.28. height=0.74 + pose z=0.37 → top at 0.74 m; table center at
+    # x=0.53 so its front edge (x≈0.13) clears the robot body (front at x≈0.08),
+    # while the object sits under the right arm (offset −0.25) at x≈0.28. The
+    # table is centred on y=−0.15 so the object (no y-offset) lands under the
+    # right shoulder.
     type: procedural_table
     params: {width: 0.8, depth: 0.7, height: 0.74, thickness: 0.04, leg_thickness: 0.05}
-    pose: {translation: [0.53, -0.10, 0.37], quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]}
+    pose: {translation: [0.53, -0.15, 0.37], quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]}
     support_label: table_top
     collision: cuboid_from_extents
 
 object_slot:
   parent: table
   surface: table_top
-  # Placed at the right arm's workspace sweet spot (FK-mapped): close to the body
-  # (x≈0.20) and moderately high (z≈0.82) so the arm reaches it in a compact,
-  # non-extended pose with maximum orientation freedom — that is what makes a
-  # useful fraction of the GraspGenX grasps reachable (vs ~1/80 at the reach
-  # edge). table center x=0.53 + offset −0.33 → object x≈0.20.
-  translation_offset: [-0.33, 0.0, 0.0]
+  # Placed directly under the right arm's natural reach point. A DLS-IK sweep of
+  # the fixed-base standing G1 shows the right palm reaches top-down grasps out to
+  # x≈0.28 across the whole y-range, and the RIGHT_ARM_READY seed puts the palm at
+  # world ≈ [0.273, −0.158, 0.902] — hovering right above THIS spot. Placing the
+  # object here (vs the old cramped x≈0.20, which sat 8 cm inboard of the seed and
+  # only 4 cm off the torso front) makes the grasp happen in free space: the box
+  # front face at x≈0.20 clears the torso (front at x≈0.08) by ~12 cm, so hand and
+  # box no longer visually overlap the body. table center x=0.53 + offset −0.25 →
+  # object x≈0.28; y=−0.15 puts it under the right shoulder. See docs §9.10.
+  translation_offset: [-0.25, 0.0, 0.0]
   upright: true
   mesh_scale: 0.001
   pre_rotation: [1.0, 0.0, 0.0, 90.0]
@@ -41,4 +46,4 @@ visual:
   show_ground_grid: true
   background_color: [0.95, 0.95, 0.95]
   # Front-right view so the right-arm grasp is clearly visible.
-  camera: {eye: [1.15, -0.60, 1.35], target: [0.30, -0.10, 0.83]}
+  camera: {eye: [1.20, -0.70, 1.35], target: [0.28, -0.15, 0.85]}

@@ -15,7 +15,11 @@ curobo:
   # approach/finger axis, so the pipeline's "approach along tool +Z" assumption
   # holds. (profile.tool_frame stays right_hand_palm_link for the wrist cam.)
   tool_frame: right_dex3_tcp
-  default_joint_position: [0.5, 0.0, -0.2, 0.3, 0.0, 0.0, 0.0]
+  # Plan start seed = RIGHT_ARM_READY: right palm hovering over the object,
+  # pointing down (FK-found). Starting here lets cuRobo's trajopt converge on the
+  # full approach→grasp→lift. Must match cspace.default_joint_position in
+  # curobo_assets/g1_dex3.yml. See build_g1_dex3.py and docs §9.8.
+  default_joint_position: [0.5, 0.0, -0.2, 1.5708, 0.0, 0.0, 0.0]
 
 graspgen:
   # Dex3 hand is the GraspGenX `unitree_g1` gripper (revolute_3f, 7 joints,
@@ -38,11 +42,11 @@ robot_base_pose:
   translation: [0.0, 0.0, 0.787]
   quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
-# G1 + Dex3 URDF from the sibling SAGE-Grasp checkout (${SAGE} resolves via
-# end2end/paths.py, overridable with $GRASPGENX_SAGE_DIR). The Dex3 hands are
-# already baked into this URDF (…_hand14).
-urdf_path: ${SAGE}/assets/g1/g1_body29_hand14.urdf
-asset_root_path: ${SAGE}/assets/g1
+# G1 + Dex3 URDF, vendored into the repo under end2end/robots/g1/ (${E2E}
+# resolves via end2end/paths.py). The Dex3 hands are already baked into this
+# URDF (…_hand14); meshes live in the sibling meshes/ dir.
+urdf_path: ${E2E}/robots/g1/g1_body29_hand14.urdf
+asset_root_path: ${E2E}/robots/g1
 
 # PD / sim overrides for dynamic_playback (Stage B). Arm gains mirror the Franka
 # (stiff tracking of the cuRobo path); finger gains are gentle position control

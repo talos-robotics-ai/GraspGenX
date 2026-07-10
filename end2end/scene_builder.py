@@ -337,6 +337,12 @@ def build_scene(
         except Exception:
             pass
 
+    # The object's synth MeshAsset is built from the raw mesh *file* and so its
+    # .mesh() ignores the env's mesh_scale / pre_rotation — HOPE meshes come in
+    # millimetres, which renders the object ~1000x too big (i.e. invisible on the
+    # table). Use the already scaled + rotated `object_mesh` for rendering.
+    vis_meshes["object"] = (object_mesh, object_world_T)
+
     return SceneBundle(
         synth_scene=scene,
         object_world_T=object_world_T,

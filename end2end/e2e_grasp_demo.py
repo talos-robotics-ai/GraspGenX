@@ -219,6 +219,14 @@ def parse_args() -> argparse.Namespace:
         "--no_show_grasps_in_mp4", action="store_false", dest="show_grasps_in_mp4"
     )
     ap.add_argument(
+        "--grasp_overlay_in_mp4",
+        choices=("all", "chosen", "none"),
+        default="all",
+        help="How much grasp overlay to draw in the MP4: 'all' = full candidate "
+        "cloud + chosen grasp (default); 'chosen' = only the picked grasp (clean "
+        "view, no offset candidate cloud); 'none' = nothing.",
+    )
+    ap.add_argument(
         "--max_plan_attempts",
         type=int,
         default=40,
@@ -938,6 +946,19 @@ def plan_to_grasp(
         while pos.ndim > 2:
             pos = pos[0]
         pos = pos.astype(np.float32)
+        # cuRobo's trajectory columns are ALL of the model's cspace DOFs in
+        # kinematic order. For a robot with locked joints that sit *before* the
+        # active arm in that order (e.g. the G1's waist precedes the right arm),
+        # a positional [:n_arm] slice downstream would grab the wrong columns.
+        # Select the active-arm columns by name so the layout is always the
+        # profile's arm-joint order. (For franka the arm is already first, so
+        # this is a no-op.)
+        jn = getattr(t, "joint_names", None)
+        want = list(getattr(planner, "joint_names", []) or [])
+        if jn is not None and want and pos.shape[1] == len(jn) and all(
+            w in jn for w in want
+        ):
+            pos = pos[:, [jn.index(w) for w in want]]
         li = _last_idx(last_tstep)
         if li is not None and 0 <= li < pos.shape[0] - 1:
             pos = pos[: li + 1]
@@ -1002,12 +1023,26 @@ def export_trajectory(
     camera_target: List[float],
     output_path: Path,
     fps: int = 30,
+    segments: Optional[List[Tuple[str, int]]] = None,
+    object_label: str = "object",
+    attach_object: bool = True,
 ):
     """Build the trajectory JSON used by render_trajectory_mp4.py.
 
     joint_traj: ``(T, n_arm + n_gripper)`` numpy array with column layout
     matching the profile (arm joints first, then each master gripper
     joint).
+
+    In kinematic mode there is no physics to carry the object, so by default
+    (``attach_object=True``) we *rigidly* attach the grasped object to the tool
+    frame once the fingers finish closing: for every frame at/after the end of
+    the ``close_fingers`` segment the object pose is ``T_tool(t) @
+    T_tool(attach)^-1 @ T_obj_init``. This makes ``pick_and_lift`` actually show
+    the object being lifted (via the same ``objects`` + per-frame
+    ``object_poses`` schema the dynamic path and the renderer already use),
+    instead of the object staying pinned to the table while the hand rises.
+    Needs ``segments`` to locate the grasp-close boundary; without it the object
+    falls back to a pinned static entry.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1016,13 +1051,30 @@ def export_trajectory(
     static_dir = output_path.parent / "static_meshes"
     static_dir.mkdir(exist_ok=True)
 
+    # Work out the frame at which the grasp is secured (end of close_fingers).
+    # Everything from there on rigidly follows the tool frame.
+    attach_frame: Optional[int] = None
+    if attach_object and segments:
+        acc = 0
+        for name, n in segments:
+            acc += int(n)
+            if name == "close_fingers":
+                attach_frame = acc  # first frame with fingers fully closed
+                break
+
     static: Dict[str, Dict[str, Any]] = {}
+    object_meshes: Dict[str, np.ndarray] = {}  # name -> initial world T
     for name, (mesh, T_world) in bundle.vis_meshes.items():
         rel = f"static_meshes/{name}.obj"
         try:
             mesh.export(static_dir / f"{name}.obj")
         except Exception as e:
             log.warning("Failed to export %s: %s", name, e)
+            continue
+        # The grasped object becomes an animated ``objects`` entry (below) when
+        # we can attach it; every other mesh (table, bin, …) stays static.
+        if name == "object" and attach_frame is not None:
+            object_meshes[name] = T_world
             continue
         static[name] = {
             "mesh_rel": rel,
@@ -1038,6 +1090,23 @@ def export_trajectory(
 
     actuated = fk.actuated_joint_names()
     n_arm = profile.n_arm
+
+    # Per-frame phase label from the task's segment list (defaults to "plan").
+    phase_of = ["plan"] * joint_traj.shape[0]
+    if segments:
+        idx = 0
+        for name, n in segments:
+            for _ in range(int(n)):
+                if idx < len(phase_of):
+                    phase_of[idx] = name
+                idx += 1
+
+    # Attached-object bookkeeping: the tool-frame pose at the attach frame,
+    # captured lazily on the first frame we reach it.
+    tool_frame = profile.tool_frame
+    T_tool_attach_inv: Optional[np.ndarray] = None
+    obj_id = "object_0"
+    object_poses_per_frame: List[Dict[str, List[List[float]]]] = []
 
     frames = []
     for t in range(joint_traj.shape[0]):
@@ -1073,13 +1142,30 @@ def export_trajectory(
                     "transform": T_world_mesh.tolist(),
                 }
             )
-        frames.append(
-            {
-                "phase": "plan",
-                "joint_position": joint_traj[t].tolist(),
-                "parts": parts,
-            }
-        )
+
+        frame: Dict[str, Any] = {
+            "phase": phase_of[t],
+            "joint_position": joint_traj[t].tolist(),
+            "parts": parts,
+        }
+
+        # Rigidly carry the grasped object with the tool frame once fingers
+        # have closed. Before the attach frame it sits at its initial pose.
+        if object_meshes and attach_frame is not None:
+            T_obj_init = object_meshes["object"]
+            if t < attach_frame:
+                T_obj = T_obj_init
+            else:
+                T_tool = fk.fk(
+                    cfg_dict, base_T=bundle.robot_base_T, link_names=[tool_frame]
+                )[tool_frame]
+                if T_tool_attach_inv is None:
+                    T_tool_attach_inv = np.linalg.inv(T_tool)
+                T_obj = T_tool @ T_tool_attach_inv @ T_obj_init
+            frame["object_poses"] = {obj_id: T_obj.tolist()}
+            object_poses_per_frame.append(frame["object_poses"])
+
+        frames.append(frame)
 
     target_grasp = (
         grasps_world[target_idx].tolist()
@@ -1091,7 +1177,7 @@ def export_trajectory(
         "target_grasp_transform": target_grasp,
     }
 
-    traj = {
+    traj: Dict[str, Any] = {
         "fps": fps,
         "total_frames": len(frames),
         "base_dir": str(output_path.parent.resolve()),
@@ -1100,6 +1186,20 @@ def export_trajectory(
         "annotations": annotations,
         "frames": frames,
     }
+    if object_meshes and attach_frame is not None:
+        traj["objects"] = [
+            {
+                "id": obj_id,
+                "label": object_label,
+                "mesh_rel": "static_meshes/object.obj",
+            }
+        ]
+        log.info(
+            "Object '%s' attached to %s from frame %d (grasp close) — lifts with hand",
+            object_label,
+            tool_frame,
+            attach_frame,
+        )
     output_path.write_text(json.dumps(traj))
     log.info("Trajectory JSON: %s (%d frames)", output_path, len(frames))
 
@@ -1418,6 +1518,7 @@ def main():
             ]
             if args.show_grasps_in_mp4:
                 cmd.append("--show-grasps")
+                cmd += ["--grasp-overlay", args.grasp_overlay_in_mp4]
             env = os.environ.copy()
             env["PYOPENGL_PLATFORM"] = "egl"
             env["PYGLET_HEADLESS"] = "true"
@@ -1495,6 +1596,7 @@ def main():
     # dynamic mode it's essential — the object only follows the gripper
     # up if the fingers are already closed around it.
     joint_traj_np = None
+    task_result = None
     if success and pregrasp_traj is not None:
         # The action sequence (approach + grasp + close + lift, optionally
         # transport + drop + release for pick_and_drop_in_bin, etc.) is
@@ -1585,6 +1687,8 @@ def main():
             camera_target=list(cam_target),
             output_path=export_path,
             fps=args.mp4_fps,
+            segments=(task_result.segments if task_result is not None else None),
+            object_label=Path(args.mesh_file).stem if args.mesh_file else "object",
         )
 
     # MP4 (third-person view)
@@ -1605,6 +1709,7 @@ def main():
         ]
         if args.show_grasps_in_mp4:
             cmd.append("--show-grasps")
+            cmd += ["--grasp-overlay", args.grasp_overlay_in_mp4]
         env = os.environ.copy()
         env["PYOPENGL_PLATFORM"] = "egl"
         env["PYGLET_HEADLESS"] = "true"
