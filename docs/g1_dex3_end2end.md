@@ -193,32 +193,58 @@ existing `trajectory.json`; add `--resolution 640x480` etc. as needed.
 
 ---
 
-## 7. Stage B plan — AMO lower body in Newton
+## 7. Stage B — AMO lower body in Newton (implemented)
 
-Goal: the G1 stands on a **floating base** and the **AMO policy** holds balance
-(SAGE-Grasp's pelvis-hold standing mode) while cuRobo's right-arm trajectory
-executes the pick under Newton physics.
+The G1 stands on a **floating base** and the **AMO policy** holds balance while
+cuRobo's right-arm trajectory executes the pick under Newton physics. Enabled by
+`--playback_mode dynamic --wholebody_amo`.
 
-Work items:
+**Run it** (from a fresh Stage A `trajectory.json`; the dynamic path re-plans
++ simulates, so run the full command):
 
-1. **Floating base.** Spawn the G1 in `dynamic_playback.py` with a free base
-   joint (today the pipeline is fixed-base). The 15 lower-body DOFs (legs +
-   waist) become physically actuated rather than locked.
-2. **AMO controller in the substep loop.** Port `AMOObservationBuilder` off
-   MuJoCo `mjData` onto Newton state: torso orientation / angular velocity /
-   height, projected gravity, gait phase, the 10-deep proprio + 25-deep extra
-   history buffers, and the adapter network — then run `amo_jit.pt` and write
-   the leg+waist PD targets each control step (AMO runs at 50 Hz; decimate vs
-   the physics step). The right-arm DOFs stay driven by the cuRobo trajectory
-   and the Dex3 fingers by the close logic. `G1Dex3Profile.amo_checkpoints` and
-   `lower_body_joint_names` already carry the config this needs.
-3. **Consistency.** The right arm's base (`torso_link`) is quasi-static while
-   standing, so cuRobo's plan against the locked-leg model stays valid; monitor
-   torso drift and re-tune gains if AMO sways.
+```bash
+CUDA_VISIBLE_DEVICES=0 PYOPENGL_PLATFORM=egl PYGLET_HEADLESS=true \
+uv run python end2end/e2e_grasp_demo.py \
+  --robot_config end2end/robots/g1_dex3.yaml \
+  --env_config   end2end/envs/g1_tabletop_demo.yaml \
+  --task pick_and_lift --playback_mode dynamic --wholebody_amo --no-viser \
+  --num_grasps 400 --topk 100 --grasp_threshold 0.5 --planner graspmoe \
+  --max_plan_attempts 100 --hold_after_close_frames 120 --seed 0 \
+  --grasp_overlay_in_mp4 chosen --sim_fps 50 \
+  --mesh_file assets/sample_data/hope_objects/GranolaBars.obj \
+  --export-trajectory end2end/runs/g1_stageB/trajectory.json \
+  --render-mp4        end2end/runs/g1_stageB/demo.mp4
+```
 
-**Highest risk:** the AMO observation was authored for MuJoCo state conventions
-(quaternion order, velocity frames). Porting it to Newton is the crux and needs
-careful validation before trusting balance under contact.
+**How it's wired:**
+
+1. **AMO controller** — `end2end/amo_control.py` (vendored from SAGE
+   `control_stack.py`, no SAGE dep). `AMOObservationBuilder` builds the 93-dim
+   proprio obs + adapter network + history buffers (byte-identical layout to the
+   training obs); `AMOBalanceController.lower_body_targets(...)` runs `amo_jit.pt`
+   and returns the 15 leg+waist position targets. Verified in isolation (loads
+   the vendored checkpoints, correct output shape/magnitude).
+2. **Floating base** — `dynamic_playback._build_scene` calls
+   `add_urdf(floating=True)` when `use_floating_base` (= `profile.floating_base
+   and wholebody_amo`), and puts **all 29 body joints** under PD position control
+   (legs+waist ke/kd 120/8, arms 60/3, from SAGE `control.yaml`). The base free
+   joint + legs/waist/left-arm are seeded to the AMO standing pose.
+3. **Control loop** — the AMO ticks at 50 Hz (`control_dt=0.02`, decimated vs the
+   physics step) inside the substep loop, writing fresh leg+waist targets into
+   `joint_target_pos`. The right arm follows the cuRobo trajectory (per-frame),
+   the left arm holds at standing, the Dex3 fingers close per the schedule.
+4. **Guardrail** — the base is floated **only** with `--wholebody_amo`; a plain
+   `--playback_mode dynamic` G1 stays fixed-base (won't collapse).
+
+**Runtime unknowns to verify on the first run (flagged in the code):**
+- Newton free-joint conventions: q = `[px,py,pz, qx,qy,qz,qw]` and qd =
+  `[angular(3), linear(3)]` (assumed; if the robot spins/topples immediately,
+  these are the first suspects — see the `VERIFY` comment in the substep loop).
+- SolverMuJoCo stability with a free joint + the AMO PD; foot↔ground friction.
+- cuRobo planned the arm with the **waist locked at 0**; AMO now actuates the
+  waist. For quiet standing the waist stays ~0, so the arm plan stays valid, but
+  large sway would drift the arm's world pose — monitor and re-tune gains.
+- The AMO policy is **CUDA-bound** (raises on CPU).
 
 ---
 

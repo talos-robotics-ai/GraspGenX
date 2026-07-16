@@ -123,6 +123,20 @@ class RobotProfile:
     # Newton Panda examples use 0.15–0.5 here.
     gripper_armature: float = 0.0
 
+    # Stage B: if True the URDF root is added as a Newton FREE joint (6-DOF
+    # floating base) instead of being fixed to the world, and the whole body
+    # (legs+waist+arms) is put under PD position control so a balance policy
+    # (AMO) can hold the robot up. False = fixed base (Franka/UR, G1 Stage A).
+    floating_base: bool = False
+    # Per-group PD gains (ke/kd) for the body joints when floating_base — from
+    # SAGE control.yaml. Unused for fixed-base robots (they use arm_kp/kd only).
+    body_pd_gains: Dict[str, Tuple[float, float]] = field(
+        default_factory=lambda: {
+            "lower_body": (120.0, 8.0),  # legs + waist (AMO-owned)
+            "upper_body": (60.0, 3.0),   # arms
+        }
+    )
+
     # Per-profile filter for which gripper bodies actually get CoACD
     # (vs convex_hull). Empty tuple means *all* gripper bodies get
     # CoACD — right for the Robotiq where every finger link has
@@ -625,6 +639,10 @@ class G1Dex3Profile(RobotProfile):
     coacd_link_keywords: Tuple[str, ...] = ("thumb_2", "middle_1", "index_1")
 
     # -- Stage B (AMO lower body) — consumed by the Newton dynamic controller --
+    # Floating base + whole-body PD (see RobotProfile.floating_base). The G1 must
+    # stand on its own legs under physics, so unlike Franka/UR it is NOT bolted
+    # to the world. Only takes effect in dynamic playback with --wholebody_amo.
+    floating_base: bool = True
     # 15 lower-body joints AMO owns (legs + waist), in the canonical G1 order.
     lower_body_joint_names: List[str] = field(
         default_factory=lambda: [

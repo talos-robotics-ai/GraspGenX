@@ -141,6 +141,17 @@ class _RobotLayout:
     # Velocity-mode close: for each gripper joint, a (qd_offset,
     # closing_velocity) tuple. Empty for position-mode profiles.
     velocity_close_drives: List[Tuple[int, float]] = field(default_factory=list)
+    # Floating base (Stage B): {canonical G1 joint name -> q_offset} for all
+    # 29 body joints, used to read state + write AMO targets. Empty otherwise.
+    body_q_offsets: Dict[str, int] = field(default_factory=dict)
+    # Matching {name -> qd_offset} into joint_qd / joint_target_vel.
+    body_qd_offsets: Dict[str, int] = field(default_factory=dict)
+    # q_offset - qd_offset for the driven (body) joints. 0 for a fixed base;
+    # with a floating base the root FREE joint has 7 coords but 6 dofs, so every
+    # body joint's q_offset is 1 ahead of its qd_offset. joint_q is q-indexed;
+    # joint_target_pos / joint_target_vel / joint_target_ke|kd|mode are all
+    # qd-indexed — so any of those is written at (q_offset - target_dof_gap).
+    target_dof_gap: int = 0
 
     @property
     def object_body_idx(self) -> int:
@@ -339,6 +350,7 @@ def _build_scene(
     object_mu: float,
     finger_mu: float,
     physics_overrides: dict | None = None,
+    use_floating_base: bool = False,
 ) -> Tuple[newton.Model, _RobotLayout, List[str]]:
     """Construct a Newton :class:`Model` for dynamic playback.
 
@@ -424,6 +436,7 @@ def _build_scene(
     builder.add_urdf(
         profile.urdf_path,
         xform=robot_base_xform,
+        floating=use_floating_base,
         enable_self_collisions=False,
         parse_visuals_as_colliders=False,
         collapse_fixed_joints=True,
@@ -626,6 +639,18 @@ def _build_scene(
     )
 
     # ---- 3. Drive gains (PD on all driven DOFs) ---------------------------
+    # joint_target_* / joint_target_ke|kd|mode / joint_armature / effort_limit
+    # are indexed by *qd* (dof), which equals q for single-DOF joints but is
+    # 1 behind for every joint after a floating base's root FREE joint. Route
+    # every such write through _dof(q_off) so it lands on the qd index. For a
+    # fixed base target_dof_gap == 0 → no-op (Franka/UR unchanged).
+    _qd_start_b = builder.joint_qd_start
+    _a0 = bare_to_idx[profile.arm_joint_names[0]]
+    target_dof_gap = int(joint_q_start[_a0]) - int(_qd_start_b[_a0])
+
+    def _dof(q_off: int) -> int:
+        return q_off - target_dof_gap
+
     arm_kp = profile.dynamic_overrides.get("arm_kp", ARM_KP_DEFAULT)
     arm_kd = profile.dynamic_overrides.get("arm_kd", ARM_KD_DEFAULT)
     finger_kp = profile.dynamic_overrides.get("finger_kp", FINGER_KP_DEFAULT)
@@ -633,9 +658,9 @@ def _build_scene(
 
     # Arm: position control always.
     for q_off in arm_q_starts:
-        builder.joint_target_ke[q_off] = float(arm_kp)
-        builder.joint_target_kd[q_off] = float(arm_kd)
-        builder.joint_target_mode[q_off] = int(newton.JointTargetMode.POSITION)
+        builder.joint_target_ke[_dof(q_off)] = float(arm_kp)
+        builder.joint_target_kd[_dof(q_off)] = float(arm_kd)
+        builder.joint_target_mode[_dof(q_off)] = int(newton.JointTargetMode.POSITION)
 
     # Gripper: position or velocity, per the profile.
     velocity_close_drives: List[Tuple[int, float]] = []
@@ -646,11 +671,11 @@ def _build_scene(
         # the motion. Match `newton_grasp_eval.py`'s `FINGER_KD=800`.
         velocity_kd = float(profile.dynamic_overrides.get("finger_velocity_kd", 800.0))
         for name, q_off, _, _ in gripper_drives:
-            builder.joint_target_ke[q_off] = 0.0
-            builder.joint_target_kd[q_off] = velocity_kd
-            builder.joint_target_mode[q_off] = int(newton.JointTargetMode.VELOCITY)
+            builder.joint_target_ke[_dof(q_off)] = 0.0
+            builder.joint_target_kd[_dof(q_off)] = velocity_kd
+            builder.joint_target_mode[_dof(q_off)] = int(newton.JointTargetMode.VELOCITY)
             close_vel = float(profile.gripper_close_velocity.get(name, -0.1))
-            velocity_close_drives.append((q_off, close_vel))
+            velocity_close_drives.append((_dof(q_off), close_vel))
         log.info(
             "Gripper drive: VELOCITY mode (kd=%.0f), closing velocities=%s",
             velocity_kd,
@@ -661,25 +686,57 @@ def _build_scene(
         )
     else:
         for _, q_off, _, _ in gripper_drives:
-            builder.joint_target_ke[q_off] = float(finger_kp)
-            builder.joint_target_kd[q_off] = float(finger_kd)
-            builder.joint_target_mode[q_off] = int(newton.JointTargetMode.POSITION)
+            builder.joint_target_ke[_dof(q_off)] = float(finger_kp)
+            builder.joint_target_kd[_dof(q_off)] = float(finger_kd)
+            builder.joint_target_mode[_dof(q_off)] = int(newton.JointTargetMode.POSITION)
         log.info(
             "Gripper drive: POSITION mode (ke=%.0f, kd=%.0f)", finger_kp, finger_kd
         )
 
     # Mimic followers: position mode tracking master joint position.
     for q_off, _, _, _ in mimic_drives:
-        builder.joint_target_ke[q_off] = MIMIC_KP
-        builder.joint_target_kd[q_off] = MIMIC_KD
-        builder.joint_target_mode[q_off] = int(newton.JointTargetMode.POSITION)
+        builder.joint_target_ke[_dof(q_off)] = MIMIC_KP
+        builder.joint_target_kd[_dof(q_off)] = MIMIC_KD
+        builder.joint_target_mode[_dof(q_off)] = int(newton.JointTargetMode.POSITION)
 
     # Optional gripper armature (Newton's PD is unstable on low-inertia
     # prismatic joints without it).
     if profile.gripper_armature > 0:
         for _, q_off, _, _ in gripper_drives:
-            builder.joint_armature[q_off] = float(profile.gripper_armature)
+            builder.joint_armature[_dof(q_off)] = float(profile.gripper_armature)
         log.info("Gripper armature set to %.3f", profile.gripper_armature)
+
+    # ---- 3b. Whole-body PD for a floating base (Stage B / AMO) -------------
+    # Fixed-base robots (Franka/UR, G1 Stage A) only drive the arm + gripper.
+    # A floating-base G1 must hold ITSELF up, so every body joint (legs, waist,
+    # both arms) goes under PD *position* control: the AMO policy commands the
+    # legs+waist each control step, the arms track their external targets. This
+    # OVERRIDES the arm gains set above with the AMO-training upper-body gains.
+    body_q_offsets: Dict[str, int] = {}
+    body_qd_offsets: Dict[str, int] = {}
+    if use_floating_base:
+        from amo_control import G1_BODY_JOINTS
+
+        joint_qd_start = builder.joint_qd_start
+        lower_ke, lower_kd = profile.body_pd_gains["lower_body"]
+        upper_ke, upper_kd = profile.body_pd_gains["upper_body"]
+        lower_set = set(profile.lower_body_joint_names)
+        for name in G1_BODY_JOINTS:
+            idx = bare_to_idx.get(name)
+            if idx is None:
+                continue
+            q_off = joint_q_start[idx]
+            qd_off = joint_qd_start[idx]
+            body_q_offsets[name] = q_off
+            body_qd_offsets[name] = qd_off
+            ke, kd = (lower_ke, lower_kd) if name in lower_set else (upper_ke, upper_kd)
+            builder.joint_target_ke[qd_off] = float(ke)
+            builder.joint_target_kd[qd_off] = float(kd)
+            builder.joint_target_mode[qd_off] = int(newton.JointTargetMode.POSITION)
+        log.info(
+            "Floating base: whole-body PD on %d joints (lower %g/%g, upper %g/%g)",
+            len(body_q_offsets), lower_ke, lower_kd, upper_ke, upper_kd,
+        )
 
     # Override URDF effort limit on the finger joints (Newton parses the
     # URDF's `effort=20` for the panda fingers, which caps the PD force
@@ -688,7 +745,7 @@ def _build_scene(
     # bumping for our setup gives the gripper authority to close.
     finger_effort = float(profile.dynamic_overrides.get("finger_effort_limit", 200.0))
     for _, q_off, _, _ in gripper_drives:
-        builder.joint_effort_limit[q_off] = finger_effort
+        builder.joint_effort_limit[_dof(q_off)] = finger_effort
 
     # ---- 4. Higher friction on gripper-pad shapes for stable grasps -------
     # Skip this blanket loop when per-shape JSON overrides are in effect —
@@ -998,6 +1055,9 @@ def _build_scene(
         mimic_drives=mimic_drives,
         object_body_idxs=object_body_idxs,
         velocity_close_drives=velocity_close_drives,
+        body_q_offsets=body_q_offsets,
+        body_qd_offsets=body_qd_offsets,
+        target_dof_gap=target_dof_gap,
     )
     return model, layout, body_labels
 
@@ -1020,13 +1080,16 @@ def _set_joint_targets(
     PD drive stays aligned with Newton's mimic constraint instead of
     fighting it back toward 0.
     """
+    # ``targets`` is joint_target_pos, which is qd-indexed — shift every q_offset
+    # by the floating-base dof gap (0 for a fixed base). See _RobotLayout.
+    g = layout.target_dof_gap
     out = targets.copy()
     for off, v in zip(layout.arm_q_starts, arm_q):
-        out[off] = float(v)
+        out[off - g] = float(v)
     for name, q_off, _, _ in layout.gripper_drives:
-        out[q_off] = float(gripper_q[name])
+        out[q_off - g] = float(gripper_q[name])
     for q_off, master_q_off, mult, ofs in layout.mimic_drives:
-        out[q_off] = float(mult) * float(out[master_q_off]) + float(ofs)
+        out[q_off - g] = float(mult) * float(out[master_q_off - g]) + float(ofs)
     return out
 
 
@@ -1050,8 +1113,15 @@ def simulate_and_export(
     object_mass: float = DEFAULT_OBJECT_MASS,
     object_mu: float = DEFAULT_OBJECT_MU,
     finger_mu: float = DEFAULT_FINGER_MU,
+    wholebody_amo: bool = False,
+    pelvis_assist_kp: float = 800.0,
 ) -> Path:
     """Replay ``joint_traj`` in Newton and write the simulated trajectory JSON.
+
+    ``wholebody_amo`` (Stage B): with a floating-base profile, run the AMO
+    balance policy on the legs+waist each control step so the G1 stands on its
+    own while the right arm follows ``joint_traj``. Requires
+    ``profile.floating_base`` and the vendored AMO checkpoints.
 
     Args:
         bundle: scene_builder.SceneBundle produced by build_scene().
@@ -1106,6 +1176,7 @@ def simulate_and_export(
     # they're per-robot — a gripper combo can set gap/margin while Franka
     # (no such keys) keeps Newton's defaults.
     physics_overrides = _physics_overrides_from_profile(profile)
+    use_floating_base = bool(profile.floating_base and wholebody_amo)
     model, layout, body_labels = _build_scene(
         bundle=bundle,
         profile=profile,
@@ -1114,6 +1185,7 @@ def simulate_and_export(
         object_mu=object_mu,
         finger_mu=finger_mu,
         physics_overrides=physics_overrides,
+        use_floating_base=use_floating_base,
     )
     log.info(
         "Newton scene: %d bodies, %d joints, %d shapes; object_body=%d",
@@ -1146,6 +1218,42 @@ def simulate_and_export(
     # solver doesn't do a violent correction in the first step.
     for q_off, master_q_off, mult, ofs in layout.mimic_drives:
         joint_q_init[q_off] = mult * joint_q_init[master_q_off] + ofs
+
+    # Floating base (Stage B): seed the legs/waist/left-arm at the AMO standing
+    # pose and the free-joint base at robot_base_T, so the robot starts upright
+    # and balanced instead of collapsing before the policy engages. The right
+    # arm + gripper are already seeded from joint_traj[0] above.
+    base_free_q_off: int | None = None
+    base_free_qd_off: int | None = None
+    if use_floating_base and layout.body_q_offsets:
+        from amo_control import AMO_DEFAULT_DOF_POS, G1_BODY_JOINTS
+
+        seed_names = set(G1_BODY_JOINTS) - set(profile.arm_joint_names)
+        for i, name in enumerate(G1_BODY_JOINTS):
+            if name in seed_names and name in layout.body_q_offsets:
+                joint_q_init[layout.body_q_offsets[name]] = float(AMO_DEFAULT_DOF_POS[i])
+        # Locate the base FREE joint and seed its 7-DOF pose (pos + xyzw quat)
+        # to the pelvis pose. Newton free-joint q = [px,py,pz, qx,qy,qz,qw].
+        jt = model.joint_type.numpy()
+        jqs = model.joint_q_start.numpy()
+        jqds = model.joint_qd_start.numpy()
+        free_idxs = [
+            j for j in range(model.joint_count)
+            if int(jt[j]) == int(newton.JointType.FREE)
+        ]
+        if free_idxs:
+            base_free_q_off = int(jqs[free_idxs[0]])
+            base_free_qd_off = int(jqds[free_idxs[0]])
+            T = bundle.robot_base_T
+            qw = tra.quaternion_from_matrix(T)  # [w, x, y, z]
+            joint_q_init[base_free_q_off : base_free_q_off + 3] = T[:3, 3]
+            joint_q_init[base_free_q_off + 3 : base_free_q_off + 7] = [
+                qw[1], qw[2], qw[3], qw[0],
+            ]
+            log.info(
+                "Floating base: free joint q@%d qd@%d, pelvis seeded at z=%.3f",
+                base_free_q_off, base_free_qd_off, float(T[2, 3]),
+            )
     model.joint_q.assign(joint_q_init)
 
     # 3. Initial state via FK so body_q reflects joint_q.
@@ -1250,9 +1358,19 @@ def simulate_and_export(
         for bare, off in actuated_q_offset.items():
             cfg_dict[bare] = float(joint_q_np[off])
 
+        # Root transform: for a fixed base this is the nominal robot_base_T; for
+        # a FLOATING base it must be the *simulated* pelvis pose (the free joint's
+        # q = [px,py,pz, qx,qy,qz,qw]) — otherwise the render pins the robot at
+        # its nominal pose and hides the actual base motion / any fall.
+        base_T = bundle.robot_base_T
+        if base_free_q_off is not None:
+            bq = joint_q_np[base_free_q_off : base_free_q_off + 7]
+            base_T = tra.quaternion_matrix([bq[6], bq[3], bq[4], bq[5]])  # wxyz
+            base_T[:3, 3] = bq[:3]
+
         link_to_world_mesh = fk.link_poses_with_visual_offset(
             cfg_dict,
-            base_T=bundle.robot_base_T,
+            base_T=base_T,
         )
         parts: List[Dict[str, Any]] = []
         for vis, T_world_mesh in link_to_world_mesh:
@@ -1322,6 +1440,75 @@ def simulate_and_export(
     track_err_sq_sum = np.zeros(n_arm_q, dtype=np.float64)
     track_err_n = 0
 
+    # --- Stage B: AMO whole-body balance setup ---------------------------------
+    # The AMO policy runs at 50 Hz (control_dt=0.02); the sim runs at step_dt, so
+    # tick it every `amo_every` substeps and hold the leg+waist targets between.
+    # The right arm follows the cuRobo trajectory (set each frame above); the
+    # left arm holds at standing; the AMO owns legs+waist.
+    amo = None
+    amo_every = 1
+    amo_step = 0
+    amo_body_off_canon: List[int | None] = []
+    amo_body_qd_off_canon: List[int | None] = []
+    amo_lower_q_off: List[int] = []
+    if wholebody_amo:
+        if not (profile.floating_base and layout.body_q_offsets):
+            raise RuntimeError("--wholebody_amo needs a floating-base profile (e.g. g1_dex3).")
+        if base_free_q_off is None or base_free_qd_off is None:
+            raise RuntimeError("Floating-base FREE joint not found; cannot run AMO.")
+        from paths import expand as _expand
+        from amo_control import AMOBalanceController, G1_BODY_JOINTS, AMO_DEFAULT_DOF_POS
+
+        ck = {k: _expand(v) for k, v in profile.amo_checkpoints.items()}
+        amo = AMOBalanceController(
+            ck["amo_policy"], ck["adapter"], ck["adapter_norm_stats"],
+            device=str(model.device),
+        )
+        # q offsets (read joint_q) and qd offsets (write joint_target_pos, which
+        # is qd-indexed). amo_lower_qd_off targets legs+waist in joint_target_pos.
+        amo_body_off_canon = [layout.body_q_offsets.get(n) for n in G1_BODY_JOINTS]
+        amo_body_qd_off_canon = [layout.body_qd_offsets.get(n) for n in G1_BODY_JOINTS]
+        amo_lower_q_off = [layout.body_qd_offsets[n] for n in profile.lower_body_joint_names]
+        amo_every = max(1, int(round(amo.control_dt / step_dt)))
+        # Initialise ALL body targets to standing so the left arm holds and the
+        # legs/waist start at standing before the first policy tick (the right
+        # arm keeps its traj[0] target from _set_joint_targets below).
+        _arm_set = set(profile.arm_joint_names)
+        tgt0 = control.joint_target_pos.numpy()
+        for i, qd_off in enumerate(amo_body_qd_off_canon):
+            if qd_off is not None and G1_BODY_JOINTS[i] not in _arm_set:
+                tgt0[qd_off] = float(AMO_DEFAULT_DOF_POS[i])
+        control.joint_target_pos.assign(tgt0)
+        log.info(
+            "AMO whole-body balance ON: policy @ %d Hz (every %d substeps of %.4fs)",
+            int(round(1.0 / amo.control_dt)), amo_every, step_dt,
+        )
+
+    # --- Pelvis "elastic": a soft 6-DOF spring holding the floating base toward
+    # its nominal standing pose (like a light overhead harness at the crotch).
+    # The AMO alone is jittery in this out-of-distribution sim; this assist damps
+    # the base sway without pinning it (set --pelvis_assist_kp 0 to disable). It
+    # applies an external wrench to the pelvis body each substep.
+    pelvis_assist_on = bool(use_floating_base and pelvis_assist_kp > 0.0)
+    pelvis_body_idx = -1
+    if pelvis_assist_on:
+        pelvis_body_idx = next(
+            (i for i, l in enumerate(body_labels)
+             if _bare(str(l)) == "pelvis" or str(l).endswith("pelvis")),
+            -1,
+        )
+        pelvis_assist_on = pelvis_body_idx >= 0
+    if pelvis_assist_on:
+        _akp = float(pelvis_assist_kp)          # linear stiffness  [N/m]
+        _akd = 0.2 * _akp                        # linear damping    [N·s/m]
+        _akp_r = 0.3 * _akp                      # angular stiffness [N·m/rad]
+        _akd_r = 0.2 * _akp_r                    # angular damping   [N·m·s/rad]
+        _pelvis_target = np.asarray(bundle.robot_base_T[:3, 3], dtype=np.float64)
+        log.info(
+            "Pelvis elastic ON: body=%d kp=%.0f (kd=%.0f, kp_rot=%.0f) target_z=%.3f",
+            pelvis_body_idx, _akp, _akd, _akp_r, _pelvis_target[2],
+        )
+
     for t in range(total_with_settle):
         if nan_seen:
             break
@@ -1355,7 +1542,56 @@ def simulate_and_export(
             control.joint_target_vel.assign(vel_targets)
 
         for s in range(sim_substeps):
+            # Stage B: tick the AMO balance policy at 50 Hz and write the fresh
+            # leg+waist position targets (arm targets set per-frame above are
+            # left untouched). Runs on states[0], the current state.
+            if amo is not None and (amo_step % amo_every == 0):
+                jq = states[0].joint_q.numpy()
+                jqd = states[0].joint_qd.numpy()
+                bq = jq[base_free_q_off : base_free_q_off + 7]
+                # Newton free-joint q = [px,py,pz, qx,qy,qz,qw]; qd = spatial
+                # twist [angular(3), linear(3)] (warp convention). VERIFY these
+                # two conventions on the first run if the robot spins/topples.
+                base_quat_wxyz = np.array([bq[6], bq[3], bq[4], bq[5]], dtype=np.float64)
+                base_h = float(bq[2])
+                base_angvel = jqd[base_free_qd_off : base_free_qd_off + 3]
+                q29 = np.array(
+                    [jq[o] if o is not None else 0.0 for o in amo_body_off_canon],
+                    dtype=np.float64,
+                )
+                dq29 = np.array(
+                    [jqd[o] if o is not None else 0.0 for o in amo_body_qd_off_canon],
+                    dtype=np.float64,
+                )
+                lower_tgt = amo.lower_body_targets(q29, dq29, base_quat_wxyz, base_angvel, base_h)
+                tgt = control.joint_target_pos.numpy()
+                for off, v in zip(amo_lower_q_off, lower_tgt):
+                    tgt[off] = float(v)
+                control.joint_target_pos.assign(tgt)
+            amo_step += 1
+
             states[0].clear_forces()
+
+            # Pelvis elastic: re-apply the soft restoring wrench each substep
+            # (clear_forces zeroed body_f). Pulls the pelvis toward its nominal
+            # position + upright orientation with damping. body_f is a spatial
+            # vector [torque(3), force(3)] in world frame; body_qd is [ang, lin].
+            if pelvis_assist_on:
+                bq_np = states[0].body_q.numpy()
+                bqd_np = states[0].body_qd.numpy()
+                p = bq_np[pelvis_body_idx][:3]
+                qx, qy, qz, qw = bq_np[pelvis_body_idx][3:7]
+                w_ang = bqd_np[pelvis_body_idx][:3]
+                v_lin = bqd_np[pelvis_body_idx][3:6]
+                force = _akp * (_pelvis_target - p) - _akd * v_lin
+                # small-angle world torque toward identity (upright) orientation
+                s = 1.0 if qw >= 0.0 else -1.0
+                ori_err = -2.0 * np.array([qx, qy, qz]) * s
+                torque = _akp_r * ori_err - _akd_r * w_ang
+                bf = states[0].body_f.numpy()
+                bf[pelvis_body_idx] = np.concatenate([torque, force])
+                states[0].body_f.assign(bf)
+
             # Match NewtonDataGen's pattern: collide every Nth substep
             # (every step is wasteful; the contact set doesn't change
             # that fast). At sim_dt=0.001 + COLLIDE_SUBSTEPS=4, contacts
@@ -1381,10 +1617,11 @@ def simulate_and_export(
         _record_frame(phase)
 
         # --- Tracking-error accumulator (per arm joint) ---
+        # joint_q is q-indexed; joint_target_pos is qd-indexed (shift by the gap).
         joint_q_now = states[0].joint_q.numpy()
         tgt_q_now = control.joint_target_pos.numpy()
         arm_measured = joint_q_now[arm_q_offsets_np]
-        arm_target = tgt_q_now[arm_q_offsets_np]
+        arm_target = tgt_q_now[arm_q_offsets_np - layout.target_dof_gap]
         arm_err = np.abs(arm_target - arm_measured)
         track_err_peak = np.maximum(track_err_peak, arm_err)
         track_err_sq_sum += arm_err * arm_err

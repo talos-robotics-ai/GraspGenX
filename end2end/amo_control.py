@@ -44,6 +44,19 @@ G1_BODY_JOINTS = [
 # The 15 lower-body joints AMO owns (legs 0-11 + waist 12-14).
 LOWER_BODY_SLICE = slice(0, 15)
 
+# AMO standing / default pose (29 body joints, canonical order). Same values the
+# policy normalises against; used to seed the Newton state and as the PD offset.
+AMO_DEFAULT_DOF_POS = np.array(
+    [
+        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+        0.0, 0.0, 0.0,
+        0.5, 0.0, 0.2, 0.3, 0.0, 0.0, 0.0,
+        0.5, 0.0, -0.2, 0.3, 0.0, 0.0, 0.0,
+    ],
+    dtype=np.float64,
+)
+
 
 def quaternion_wxyz_to_rpy(quat: np.ndarray) -> np.ndarray:
     """(w,x,y,z) unit-ish quaternion -> (roll, pitch, yaw). Matches SAGE."""
@@ -90,16 +103,7 @@ class AMOObservationBuilder:
         self.action_scale = 0.25
 
         # Default standing pose (== AMO_STANDING in build_g1_dex3.py).
-        self.default_dof_pos = np.array(
-            [
-                -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
-                -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
-                0.0, 0.0, 0.0,
-                0.5, 0.0, 0.2, 0.3, 0.0, 0.0, 0.0,
-                0.5, 0.0, -0.2, 0.3, 0.0, 0.0, 0.0,
-            ],
-            dtype=np.float64,
-        )
+        self.default_dof_pos = AMO_DEFAULT_DOF_POS.copy()
 
         self.last_action = np.zeros(29, dtype=np.float64)
         self.demo_obs_template = np.zeros((8 + 3 + 3 + 3,), dtype=np.float64)

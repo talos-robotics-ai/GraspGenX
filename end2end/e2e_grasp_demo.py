@@ -329,6 +329,21 @@ def parse_args() -> argparse.Namespace:
         "gravity so the gripper actually grasps the object.",
     )
     ap.add_argument(
+        "--wholebody_amo",
+        action="store_true",
+        help="Stage B: with a floating-base profile (g1_dex3) in --playback_mode "
+        "dynamic, run the AMO balance policy on the legs+waist so the G1 stands "
+        "on its own while the right arm follows the plan. No-op otherwise.",
+    )
+    ap.add_argument(
+        "--pelvis_assist_kp",
+        type=float,
+        default=800.0,
+        help="Stage B: linear stiffness [N/m] of the soft 'elastic' that holds "
+        "the floating pelvis near its nominal standing pose (damps AMO sway "
+        "without pinning it). 0 disables it. Only used with --wholebody_amo.",
+    )
+    ap.add_argument(
         "--sim_fps",
         type=int,
         default=60,
@@ -1674,6 +1689,8 @@ def main():
             object_mass=args.object_mass,
             object_mu=args.object_mu,
             finger_mu=args.finger_mu,
+            wholebody_amo=args.wholebody_amo,
+            pelvis_assist_kp=args.pelvis_assist_kp,
         )
     elif joint_traj_np is not None:
         export_trajectory(
