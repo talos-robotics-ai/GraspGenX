@@ -1394,10 +1394,7 @@ class ConfigWizard:
         )
         print(f"\nNext steps:")
         print(
-            f"  1. Generate point clouds and TSDF (see README — 'Integrating a New Gripper')"
-        )
-        print(
-            f"  2. Run inference with: python scripts/demo_object_pc.py --gripper_name {self.gripper_name}"
+            f"  Run inference with: python scripts/demo_object_pc.py --gripper_name {self.gripper_name}"
         )
 
         # Update GUI

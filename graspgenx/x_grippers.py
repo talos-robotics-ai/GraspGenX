@@ -207,6 +207,74 @@ def get_gripper_info(asset_path, name: str) -> XGripperInfo:
     return gripper_info
 
 
+def make_sweep_volume_gripper_info(
+    extents_open,
+    offset_open,
+    extents_mid,
+    offset_mid,
+    gripper_type: int = 0,
+    fingertip_depth: float = None,
+    name: str = "custom_sweep_volume",
+) -> XGripperInfo:
+    """Build an XGripperInfo from raw sweep-volume parameters — no assets.
+
+    Fields the sweep_volume_v2 model conditioning does not consume (gripper
+    point clouds, TSDF, pointnet-VAE repr, meshes) are filled with the same
+    dummy placeholders :func:`get_gripper_info` uses when the corresponding
+    files are missing. The fingertip depth defaults to the top plane of the
+    open sweep box.
+    """
+    extents_open = np.asarray(extents_open, dtype=np.float32).reshape(3)
+    offset_open = np.asarray(offset_open, dtype=np.float32).reshape(3)
+    extents_mid = np.asarray(extents_mid, dtype=np.float32).reshape(3)
+    offset_mid = np.asarray(offset_mid, dtype=np.float32).reshape(3)
+
+    if fingertip_depth is None:
+        fingertip_depth = float(offset_open[2] + extents_open[2] / 2.0)
+    fingertip_depth = float(fingertip_depth)
+    gripper_width = float(extents_open[0])
+
+    ctrl_pts = load_control_points(gripper_width, fingertip_depth)
+    ctrl_vis_pts = load_control_points_for_visualization(ctrl_pts)
+
+    grasp_volume = [
+        offset_open - extents_open / 2.0,
+        offset_open + extents_open / 2.0,
+    ]
+
+    dummy_points = np.zeros((10500, 3), dtype=np.float32)
+    dummy_tsdf = {
+        "open_tsdf": np.zeros((64, 32, 64), dtype=np.float16),
+        "close_tsdf": np.zeros((64, 32, 64), dtype=np.float16),
+    }
+    dummy_vae = {
+        "open": [0.0] * 64,
+        "close": [0.0] * 64,
+        "half": [0.0] * 64,
+    }
+    dummy_mesh = trimesh.primitives.Box(extents=[0.01, 0.01, 0.01])
+
+    return XGripperInfo(
+        gripper_name=name,
+        gripper_type=int(gripper_type),
+        collision_mesh=dummy_mesh,
+        visual_mesh=dummy_mesh,
+        depth=fingertip_depth,
+        symmetric=False,
+        sweep_volume=np.concatenate([extents_open, offset_open], axis=0),
+        sweep_volume_mid=np.concatenate([extents_mid, offset_mid], axis=0),
+        grasp_volume=grasp_volume,
+        open_pointcloud=dummy_points,
+        close_pointcloud=dummy_points,
+        vol_tsdf=dummy_tsdf,
+        pointnet_vae=dummy_vae,
+        control_points=ctrl_pts,
+        control_points_visualization=ctrl_vis_pts,
+        tool_tcp_transform=tra.translation_matrix([0.0, 0.0, fingertip_depth]),
+        width=gripper_width,
+    )
+
+
 def _list_available_grippers(assets_dir: str) -> set:
     """Scan all gripper sources and return available names."""
     available = set()

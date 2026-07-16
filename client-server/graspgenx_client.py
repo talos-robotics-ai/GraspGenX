@@ -51,14 +51,25 @@ def parse_args():
         "--pcd_file", type=str, help="Path to a point cloud file (.pcd / .ply / .xyz / .npy)"
     )
 
-    parser.add_argument(
+    gripper_group = parser.add_mutually_exclusive_group(required=True)
+    gripper_group.add_argument(
         "--gripper_name",
         type=str,
-        required=True,
         help=(
             "Name of the gripper to generate grasps for "
             "(e.g. franka_panda, robotiq_2f_140, robotiq_2f_85). "
             "The server loads the gripper's sweep volume v2 data."
+        ),
+    )
+    gripper_group.add_argument(
+        "--sweep_volume_json",
+        type=str,
+        help=(
+            "Path to a JSON file with raw sweep-volume params instead of a "
+            "gripper name (keys: extents_open, offset_open, extents_mid, "
+            "offset_mid; optional: gripper_type, fingertip_depth). Uses the "
+            "params-only 'infer_object' action — the server needs no assets "
+            "for the gripper."
         ),
     )
     parser.add_argument(
@@ -169,29 +180,48 @@ def main():
         point_cloud = load_point_cloud_from_file(args.pcd_file)
         logger.info("Loaded %d points from file", len(point_cloud))
 
+    if args.sweep_volume_json:
+        import json
+
+        from graspgenx.serving.types import SweepVolumeParams
+
+        with open(args.sweep_volume_json, "r") as f:
+            sweep_params = SweepVolumeParams.from_dict(json.load(f))
+        gripper_label = f"sweep_volume_params ({args.sweep_volume_json})"
+    else:
+        sweep_params = None
+        gripper_label = args.gripper_name
+
     logger.info("Connecting to GraspGenX server at %s:%d ...", args.host, args.port)
     with GraspGenXClient(host=args.host, port=args.port) as client:
         metadata = client.server_metadata
         logger.info("Server metadata: %s", metadata)
 
-        logger.info(
-            "Sending inference request (gripper=%s) ...", args.gripper_name
-        )
+        logger.info("Sending inference request (gripper=%s) ...", gripper_label)
         t0 = time.monotonic()
-        grasps, confidences = client.infer(
-            point_cloud,
-            gripper_name=args.gripper_name,
-            num_grasps=args.num_grasps,
-            grasp_threshold=args.grasp_threshold,
-            topk_num_grasps=args.topk_num_grasps,
-        )
+        if sweep_params is not None:
+            grasps, confidences = client.infer_object(
+                point_cloud,
+                sweep_params,
+                num_grasps=args.num_grasps,
+                grasp_threshold=args.grasp_threshold,
+                topk_num_grasps=args.topk_num_grasps,
+            )
+        else:
+            grasps, confidences = client.infer(
+                point_cloud,
+                gripper_name=args.gripper_name,
+                num_grasps=args.num_grasps,
+                grasp_threshold=args.grasp_threshold,
+                topk_num_grasps=args.topk_num_grasps,
+            )
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         print(f"\n{'='*60}")
         print(f"  GraspGenX ZMQ Client Results")
         print(f"{'='*60}")
         print(f"  Input           : {input_source}")
-        print(f"  Gripper         : {args.gripper_name}")
+        print(f"  Gripper         : {gripper_label}")
         print(f"  Points sent     : {len(point_cloud)}")
         print(f"  Grasps returned : {len(grasps)}")
         if len(grasps) > 0:
@@ -206,7 +236,7 @@ def main():
             point_cloud,
             grasps,
             confidences,
-            gripper_name=args.gripper_name,
+            gripper_name=gripper_label,
             viser_port=args.viser_port,
         )
 

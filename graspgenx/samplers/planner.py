@@ -66,9 +66,11 @@ def run_planner_on_object(
         return grasps, conf, tags, moe["obb"]
 
     # diffusion baseline
-    obj_pc_filtered_t, _ = point_cloud_outlier_removal(
-        torch.from_numpy(obj_pc.astype(np.float32))
-    )
+    obj_pc_t = torch.from_numpy(obj_pc.astype(np.float32))
+    obj_pc_filtered_t, _ = point_cloud_outlier_removal(obj_pc_t)
+    if len(obj_pc_filtered_t) < 10:
+        # Outlier removal nuked (nearly) everything — fall back to the raw PC.
+        obj_pc_filtered_t = obj_pc_t
     obj_pc_filtered = obj_pc_filtered_t.cpu().numpy()
     grasps_t, conf_t = GraspGenXSampler.run_inference(
         obj_pc_filtered,
@@ -155,6 +157,9 @@ def run_planner_on_batch(
             else pc.float()
         )
         f_t, _ = point_cloud_outlier_removal(pc_t)
+        if len(f_t) < 10:
+            # Outlier removal nuked (nearly) everything — fall back to the raw PC.
+            f_t = pc_t
         filtered_pcs.append(f_t.cpu().numpy())
 
     diff_results = GraspGenXSampler.run_inference_batch(

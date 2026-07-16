@@ -617,13 +617,15 @@ def run_graspmoe(
             "skipped_obb": True,
         }
 
-    # 2. Diffusion branch — let run_inference handle topk later (we want global top-k).
+    # 2. Diffusion branch — keep every generated grasp here (topk=num_grasps
+    # avoids run_inference's implicit 100-cap when grasp_threshold == -1);
+    # the global top-k across the union is applied later.
     grasps_diff_t, scores_diff_t = GraspGenXSampler.run_inference(
         pc_filtered,
         grasp_sampler,
         grasp_threshold=grasp_threshold,
         num_grasps=num_grasps,
-        topk_num_grasps=-1,
+        topk_num_grasps=num_grasps,
         remove_outliers=False,
     )
     if len(grasps_diff_t) > 0:
@@ -750,12 +752,15 @@ def run_graspmoe_batch(
     # Reuse the per-object discriminator embedding computed during diffusion-grasp
     # scoring for the OBB-candidate scoring, so each object is encoded once
     # instead of being re-encoded per object in the OBB branch.
+    # topk=num_grasps keeps every generated grasp here (avoids
+    # run_inference_batch's implicit 100-cap when grasp_threshold == -1);
+    # per-object thresholding + global top-k are applied afterwards.
     diff_results, obj_embeddings = GraspGenXSampler.run_inference_batch(
         [pc for pc in pc_filtered_list],
         grasp_sampler,
         grasp_threshold=-1.0,
         num_grasps=num_grasps,
-        topk_num_grasps=-1,
+        topk_num_grasps=num_grasps,
         remove_outliers=False,
         return_object_embedding=True,
     )

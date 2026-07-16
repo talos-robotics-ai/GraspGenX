@@ -12,55 +12,90 @@ import torch
 from graspgenx.dataset.dataset import collate
 from graspgenx.models.grasp_gen import GraspGen
 from graspgenx.utils.point_cloud import knn_points, point_cloud_outlier_removal
-from graspgenx.x_grippers import resolve_gripper_info
+from graspgenx.x_grippers import (
+    XGripperInfo,
+    make_sweep_volume_gripper_info,
+    resolve_gripper_info,
+)
 from graspgenx.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# gripper_backbone values that can be conditioned from raw sweep-volume
+# parameters alone (no gripper point clouds / TSDF / VAE assets required).
+SWEEP_VOLUME_ONLY_BACKBONES = {
+    "sweep_volume_v2",
+    "sweep_volume",
+    "gripper_type+sweep_volume_v2",
+    "gripper_type",
+    "z_offset",
+}
+
+
+def load_grasp_gen_model(cfg: omegaconf.DictConfig):
+    """Load the (gripper-independent) GraspGen model from cfg checkpoints.
+
+    The returned model can back any number of samplers — the gripper
+    conditioning travels with each request's data batch, not the weights.
+    """
+    model = GraspGen.from_config(cfg.diffusion, cfg.discriminator)
+    if not os.path.exists(cfg.eval.gen_checkpoint):
+        raise FileNotFoundError(f"Checkpoint {cfg.eval.gen_checkpoint} does not exist")
+    if not os.path.exists(cfg.eval.dis_checkpoint):
+        raise FileNotFoundError(f"Checkpoint {cfg.eval.dis_checkpoint} does not exist")
+    model.load_state_dict(cfg.eval.gen_checkpoint, cfg.eval.dis_checkpoint)
+    model.eval()
+    return model.cuda().eval()
 
 
 class GraspGenXSampler:
     def __init__(
         self,
         cfg: omegaconf.DictConfig,
-        gripper_name: str,
+        gripper_name: str = None,
         assets_dir: str = None,
         use_tensorrt: bool = False,
         tensorrt_precision: str = "fp32",
+        gripper_info: XGripperInfo = None,
+        model=None,
     ):
         """
         Args:
             cfg: Hydra config object
-            gripper_name: Name of the gripper (must exist in assets)
+            gripper_name: Name of the gripper (must exist in assets). Mutually
+                          exclusive with gripper_info.
             assets_dir: Root directory containing x_grippers/ and proc_grippers/
                         subdirectories. Defaults to /code/assets (docker path).
             use_tensorrt: If True, compile the diffusion denoiser to TensorRT
                           (opt-in; requires the 'tensorrt' extra). Falls back to
                           eager PyTorch if unavailable or compilation fails.
             tensorrt_precision: 'fp32' (default, exact parity) or 'fp16'.
+            gripper_info: Pre-built XGripperInfo (e.g. from raw sweep-volume
+                          params) used instead of a name-based asset lookup.
+            model: Already-loaded GraspGen model to reuse. The model is
+                   gripper-independent, so one instance can back many samplers
+                   (each request carries its own gripper conditioning).
         """
 
         self.cfg = cfg
-        self.gripper_name = gripper_name
 
-        if assets_dir is None:
-            assets_dir = "/code/assets"
+        if gripper_info is not None:
+            self.gripper = gripper_info
+            self.gripper_name = gripper_info.gripper_name
+        else:
+            if gripper_name is None:
+                raise ValueError(
+                    "GraspGenXSampler needs either gripper_name or gripper_info."
+                )
+            if assets_dir is None:
+                assets_dir = "/code/assets"
+            self.gripper = resolve_gripper_info(gripper_name, assets_dir)
+            self.gripper_name = gripper_name
 
-        self.gripper = resolve_gripper_info(gripper_name, assets_dir)
+        if model is None:
+            model = load_grasp_gen_model(cfg)
 
-        model = GraspGen.from_config(cfg.diffusion, cfg.discriminator)
-        if not os.path.exists(cfg.eval.gen_checkpoint):
-            raise FileNotFoundError(
-                f"Checkpoint {cfg.eval.gen_checkpoint} does not exist"
-            )
-        if not os.path.exists(cfg.eval.dis_checkpoint):
-            raise FileNotFoundError(
-                f"Checkpoint {cfg.eval.dis_checkpoint} does not exist"
-            )
-
-        model.load_state_dict(cfg.eval.gen_checkpoint, cfg.eval.dis_checkpoint)
-        model.eval()
-
-        self.model = model.cuda().eval()
+        self.model = model
 
         if use_tensorrt:
             from graspgenx.models.tensorrt_utils import accelerate_sampler
@@ -76,6 +111,61 @@ class GraspGenXSampler:
             # Run the GraspMoE OBB outlier-removal on GPU only when TensorRT is
             # requested; otherwise it stays on the CPU (scipy).
             set_gpu_obb(True)
+
+    @classmethod
+    def from_sweep_volume(
+        cls,
+        cfg: omegaconf.DictConfig,
+        params,
+        model=None,
+        use_tensorrt: bool = False,
+        tensorrt_precision: str = "fp32",
+    ) -> "GraspGenXSampler":
+        """Build a sampler from raw sweep-volume parameters — no gripper assets.
+
+        Args:
+            cfg: Hydra config object. Both cfg.diffusion.gripper_backbone and
+                 cfg.discriminator.gripper_backbone must be conditioned on
+                 sweep-volume-derivable representations (the released
+                 checkpoint uses 'sweep_volume_v2' for both).
+            params: A graspgenx.serving.types.SweepVolumeParams, an equivalent
+                    dict, or a flat (12,) array
+                    [extents_open, offset_open, extents_mid, offset_mid].
+            model: Optional already-loaded GraspGen model to reuse.
+        """
+        from graspgenx.serving.types import SweepVolumeParams
+
+        params = SweepVolumeParams.coerce(params)
+
+        for side_name, side in (
+            ("diffusion", cfg.diffusion),
+            ("discriminator", cfg.discriminator),
+        ):
+            backbone = str(side.gripper_backbone)
+            if backbone not in SWEEP_VOLUME_ONLY_BACKBONES:
+                raise ValueError(
+                    f"cfg.{side_name}.gripper_backbone={backbone!r} needs real "
+                    f"gripper assets and cannot be conditioned from sweep-volume "
+                    f"params alone. Supported backbones: "
+                    f"{sorted(SWEEP_VOLUME_ONLY_BACKBONES)}. Use a name-based "
+                    f"sampler instead."
+                )
+
+        gripper_info = make_sweep_volume_gripper_info(
+            extents_open=params.extents_open,
+            offset_open=params.offset_open,
+            extents_mid=params.extents_mid,
+            offset_mid=params.offset_mid,
+            gripper_type=params.gripper_type,
+            fingertip_depth=params.resolved_fingertip_depth,
+        )
+        return cls(
+            cfg,
+            gripper_info=gripper_info,
+            model=model,
+            use_tensorrt=use_tensorrt,
+            tensorrt_precision=tensorrt_precision,
+        )
 
     @staticmethod
     def run_inference(
@@ -144,6 +234,10 @@ class GraspGenXSampler:
             t1 = time.time()
             logger.info(f"Time taken for inference: {t1 - t0} seconds")
 
+        # Drop empty per-iteration results (plain lists, not tensors) so the
+        # concatenation below is well-defined even when some tries found nothing.
+        all_conf = [c for g, c in zip(all_grasps, all_conf) if len(g) > 0]
+        all_grasps = [g for g in all_grasps if len(g) > 0]
         if len(all_grasps) == 0:
             return torch.tensor([]), torch.tensor([])
 
@@ -209,7 +303,20 @@ class GraspGenXSampler:
             else:
                 pc_t = pc.float()
             if remove_outliers:
-                pc_t, _ = point_cloud_outlier_removal(pc_t)
+                pc_f, _ = point_cloud_outlier_removal(pc_t)
+                if len(pc_f) >= 10:
+                    pc_t = pc_f
+                else:
+                    logger.warning(
+                        "Outlier removal left %d/%d points; using the "
+                        "unfiltered point cloud.",
+                        len(pc_f),
+                        len(pc_t),
+                    )
+            if len(pc_t) == 0:
+                raise ValueError(
+                    "run_inference_batch received an empty point cloud."
+                )
             # Resample with replacement to the training-time budget so all
             # batch items have the same shape (collate uses torch.stack).
             n = pc_t.shape[0]
@@ -287,7 +394,18 @@ class GraspGenXSampler:
         """
 
         if remove_outliers:
-            obj_pcd, _ = point_cloud_outlier_removal(obj_pcd)
+            obj_pcd_filtered, _ = point_cloud_outlier_removal(obj_pcd)
+            if len(obj_pcd_filtered) >= 10:
+                obj_pcd = obj_pcd_filtered
+            else:
+                logger.warning(
+                    "Outlier removal left %d/%d points; using the unfiltered "
+                    "point cloud.",
+                    len(obj_pcd_filtered),
+                    len(obj_pcd),
+                )
+        if len(obj_pcd) == 0:
+            return [], [], []
 
         obj_pcd_center = obj_pcd.mean(axis=0)
         obj_pts_color = torch.zeros_like(obj_pcd)

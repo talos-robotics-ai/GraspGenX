@@ -62,6 +62,20 @@ def parse_args():
         default=5556,
         help="Port to bind the ZMQ socket (default: 5556)",
     )
+    parser.add_argument(
+        "--tensorrt",
+        action="store_true",
+        help="Accelerate the diffusion denoiser with TensorRT (opt-in; needs "
+        "the 'tensorrt' extra: `uv sync --extra tensorrt`). Falls back to "
+        "eager PyTorch fp32 if unavailable.",
+    )
+    parser.add_argument(
+        "--tensorrt_precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16"],
+        help="TensorRT precision when --tensorrt is set (default: fp32).",
+    )
     return parser.parse_args()
 
 
@@ -81,6 +95,8 @@ def main():
         host=args.host,
         port=args.port,
         default_gripper=args.default_gripper,
+        use_tensorrt=args.tensorrt,
+        tensorrt_precision=args.tensorrt_precision,
     )
     server.serve_forever()
 

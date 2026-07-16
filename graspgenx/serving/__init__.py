@@ -9,7 +9,8 @@ clients — including the MCP bridge under ``mcp/`` and the CLI under
 weights themselves.
 """
 
+from graspgenx.serving.types import SweepVolumeParams
 from graspgenx.serving.zmq_client import GraspGenXClient
 from graspgenx.serving.zmq_server import GraspGenXZMQServer
 
-__all__ = ["GraspGenXClient", "GraspGenXZMQServer"]
+__all__ = ["GraspGenXClient", "GraspGenXZMQServer", "SweepVolumeParams"]
